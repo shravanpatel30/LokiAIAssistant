@@ -1,0 +1,12 @@
+{
+  "file explorer": {
+    "type": "exe",
+    "path": "C:\\Windows\\explorer.exe",
+    "args": []
+  },
+  "rustdesk": {
+    "type": "exe",
+    "path": "C:\\Program Files\\RustDesk\\rustdesk.exe",
+    "args": []
+  }
+}

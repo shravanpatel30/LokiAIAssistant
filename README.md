@@ -1,0 +1,341 @@
+# Loki — A Private Local AI Assistant
+
+Loki is a desktop AI assistant that runs entirely on your own machine. No cloud APIs, no data sent to any external service. It can:
+
+- Open apps and websites by voice or text ("open Spotify", "go to youtube.com in Chrome")
+- Set reminders with natural-language times ("remind me in 30 minutes to check the oven")
+- Schedule recurring events (birthdays, anniversaries, weekly tasks)
+- Answer general questions and help with coding via a local LLM
+- Listen to push-to-talk voice commands and speak responses
+- Live quietly in your system tray, available whenever you press the hotkey
+
+Built for Windows. The LLM, speech recognition, and text-to-speech all run locally.
+
+---
+
+## What you need
+
+### Hardware
+
+- **Windows 10 or 11** (64-bit)
+- **16 GB RAM** minimum
+- **NVIDIA GPU with 8 GB VRAM** strongly recommended (Loki was built and tested on an RTX 3070 Ti laptop GPU). CPU-only inference works but is much slower.
+- **15 GB free disk space** for the language model and dependencies
+
+If your hardware is significantly weaker, see the **Smaller hardware** section at the bottom for tweaks.
+
+### Software prerequisites
+
+These must be installed before setting up Loki:
+
+1. **Python 3.10 or newer** — [python.org](https://www.python.org/downloads/). During install, check "Add Python to PATH."
+2. **Ollama** — [ollama.com](https://ollama.com). One-click installer. After install, open a terminal and verify with `ollama --version`.
+3. **A Piper voice model** for text-to-speech (download instructions below).
+
+---
+
+## Setup
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/yourusername/loki.git
+cd loki
+```
+
+### 2. Install Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+This installs ~15 packages and takes a few minutes.
+
+If you have an NVIDIA GPU and want Whisper to run on it (faster transcription), additionally install:
+
+```bash
+pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
+```
+
+Then edit `voice.py` and change `WHISPER_DEVICE = "cpu"` to `WHISPER_DEVICE = "cuda"`.
+
+### 3. Pull the language model
+
+```bash
+ollama pull qwen3:8b
+```
+
+This downloads ~5 GB. The model is the brain of the assistant — it handles command interpretation and chat.
+
+### 4. Download a Piper voice
+
+Loki needs a voice file for text-to-speech. Download from the Piper voices repository:
+
+- Go to [huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/amy/medium](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/amy/medium)
+- Download both files: `en_US-amy-medium.onnx` and `en_US-amy-medium.onnx.json`
+- Create a folder named `voices` in the project root
+- Place both files in that folder
+
+Other voices work too — browse the parent directory for options. If you use a different voice, update `PIPER_VOICE_PATH` in `voice.py`.
+
+### 5. Discover installed applications
+
+This scans your system for installed apps so Loki can launch them by name:
+
+```bash
+python discover_apps.py
+```
+
+Output goes to `apps.json` (one entry per app). Re-run this script anytime you install or uninstall software.
+
+If specific apps don't appear or need special launch options (like RustDesk's working directory), edit `manual_apps.json` — entries here override anything in `apps.json`.
+
+### 6. Set environment variables (recommended)
+
+For best performance, set these in your Windows environment variables (System Properties → Advanced → Environment Variables):
+
+| Variable | Value | What it does |
+|---|---|---|
+| `OLLAMA_KEEP_ALIVE` | `2h` | Keeps the LLM in VRAM longer, faster responses |
+| `HF_HUB_DISABLE_SYMLINKS_WARNING` | `1` | Silences a benign Hugging Face warning on Windows |
+
+Restart any terminal after setting these.
+
+---
+
+## Running Loki
+
+Three modes, depending on how you want to use it:
+
+### Text mode (for testing)
+
+```bash
+python assistant.py
+```
+
+Opens a REPL in your terminal. Type commands, see responses inline. Best for verifying everything works.
+
+### Voice mode (terminal stays open)
+
+```bash
+python assistant.py --voice
+```
+
+Hold **F9** to speak, release to send. Responses are spoken aloud through your default audio device. Type `exit` or close the terminal to quit.
+
+### Tray mode (recommended for daily use)
+
+```bash
+python assistant.py --tray
+```
+
+Loki runs silently in your system tray. Left-click the tray icon to open the chat window. F9 still works for push-to-talk from anywhere. Right-click the tray icon and choose Quit to exit cleanly.
+
+For fully silent operation with no console window, run with `pythonw.exe` instead of `python.exe`:
+
+```bash
+pythonw assistant.py --tray
+```
+
+In this mode, all output goes to dated log files in the `logs/` folder.
+
+### Auto-launch at login (optional)
+
+To have Loki start automatically when you log into Windows:
+
+1. Press `Win+R`, type `taskschd.msc`, press Enter
+2. **Create Task** (not "Create Basic Task")
+3. **General**: Name "Loki", check "Run only when user is logged on"
+4. **Triggers**: New → At log on
+5. **Actions**: New → Start a program. Program: full path to your `pythonw.exe`. Arguments: full path to `assistant.py --tray`. Start in: the Loki folder.
+6. **Settings**: "If the task fails, restart every 1 minute, up to 3 times"
+
+Log out and back in to verify it launches.
+
+---
+
+## Using Loki
+
+### Voice commands
+
+Press and hold **F9**, speak, release. Examples:
+
+- "Open Spotify"
+- "Go to youtube.com on Chrome"
+- "Close Notepad"
+- "Remind me to take out the trash tomorrow at 8 PM"
+- "Set a yearly reminder for my anniversary on October 12 at 9 AM"
+- "List my reminders"
+- "Cancel reminders 4, 5, and 6"
+- "What's the speed of light?"
+- "Write a Python function to reverse a string"
+
+### Text commands
+
+Same as above, but typed into the chat window or the terminal REPL.
+
+### Utility commands
+
+These work in any mode and don't go through the LLM:
+
+| Command | What it does |
+|---|---|
+| `exit`, `quit`, `bye`, `goodbye` | Stop the assistant |
+| `voice off`, `stop talking`, `be quiet` | Disable spoken replies |
+| `voice on`, `speak again` | Re-enable spoken replies |
+| `reset`, `clear`, `new chat` | Forget the current conversation |
+
+### Reminders
+
+Reminders persist in `assistant.db` (a SQLite file in the project folder). They survive restarts. If Loki was off when a reminder was due, it fires when you next launch.
+
+Reminders show Windows toast notifications in the bottom-right corner and appear in your Notification Center.
+
+### Chat window
+
+In tray mode, left-click the tray icon to open the chat window. Features:
+
+- Code blocks have a header bar with a Copy link — click to copy the code to clipboard
+- Type and press Enter to send (Send button works too)
+- Last 50 messages from disk are restored when you reopen the window
+- Close the window with X to hide it (Loki keeps running in tray)
+- Conversation history is saved to `chat_history.jsonl` (rolling last ~1000 messages)
+
+---
+
+## Project structure
+loki/
+├── assistant.py            # Main entry point, command dispatch
+├── chat_window.py          # PySide6 chat UI
+├── tray.py                 # System tray icon
+├── voice.py                # Whisper (STT) and Piper (TTS)
+├── db.py                   # SQLite for reminders
+├── reminders.py            # Scheduler and Windows toasts
+├── discover_apps.py        # Scans system for installed apps
+├── manual_apps.json        # Manual app overrides (optional)
+├── apps.json               # Generated app registry (don't edit by hand)
+├── assistant.db            # Reminders database (auto-created on first run)
+├── chat_history.jsonl      # Conversation log (auto-created on first run)
+├── AI_Icon.png             # Tray and window icon
+├── voices/                 # Piper voice files (you download these)
+├── logs/                   # Daily log files in tray mode (auto-created)
+└── requirements.txt
+
+---
+
+## Customization
+
+### Change the language model
+
+Edit `assistant.py` — find `ROUTER_MODEL` and `CHAT_MODEL`. Both default to `qwen3:8b`. You can use a smaller model on weaker hardware:
+
+- `qwen2.5:7b` — slightly older, smaller, still good
+- `llama3.2:3b` — much smaller (~2 GB), runs fine on CPU, less capable at chat
+
+Run `ollama pull <model>` first to download it.
+
+### Change the voice
+
+Download any voice from [huggingface.co/rhasspy/piper-voices](https://huggingface.co/rhasspy/piper-voices), place the `.onnx` and `.onnx.json` files in `voices/`, then update `PIPER_VOICE_PATH` in `voice.py`.
+
+### Change the hotkey
+
+In `assistant.py`, change `VOICE_HOTKEY = "f9"` to whatever you prefer. Examples: `"f12"`, `"pause"`, `"ctrl+shift+space"`.
+
+### Default voice output off
+
+If you'd rather Loki only speak when you ask it to, set `VOICE_OUTPUT = False` near the top of `assistant.py`. Re-enable per session with the "voice on" command.
+
+### Custom icon
+
+Replace `AI_Icon.png` with your own 256×256 PNG (transparent background, high contrast for visibility at 16×16 in the tray).
+
+---
+
+## Smaller hardware
+
+If you don't have a GPU or have less than 8 GB VRAM:
+
+- **Use a smaller model**: `ollama pull qwen2.5:3b` and set `ROUTER_MODEL = "qwen2.5:3b"` and `CHAT_MODEL = "qwen2.5:3b"` in `assistant.py`
+- **Run Whisper on CPU**: in `voice.py`, set `WHISPER_DEVICE = "cpu"` and `WHISPER_COMPUTE_TYPE = "int8"`
+- **Use the smallest Whisper model**: in `voice.py`, set `WHISPER_MODEL_SIZE = "base.en"` (less accurate) or `"tiny.en"` (least accurate, fastest)
+
+Loki will still work on a midrange laptop with no dedicated GPU — just slower.
+
+---
+
+## Troubleshooting
+
+### "Already running, exiting"
+
+A previous instance is still running. Check your system tray for the Loki icon and right-click → Quit. If the tray icon isn't visible, open Task Manager, find `python.exe` or `pythonw.exe`, and end the process. Then delete `%TEMP%\loki.lock` if it persists.
+
+### Toasts don't appear
+
+Check Windows notification settings: Settings → System → Notifications. Make sure notifications are enabled globally and not muted for Python.
+
+### "Couldn't understand the time"
+
+Loki uses `dateparser` for natural-language times. It handles most phrasings but occasionally trips on unusual ones. Try rephrasing: "in 30 minutes" instead of "in a half hour"; "tomorrow at 5pm" instead of "five tomorrow."
+
+### Voice transcription is inaccurate
+
+Edit `voice.py` and change `WHISPER_MODEL_SIZE = "small.en"` to `"medium.en"`. Larger model, more accurate, slower.
+
+### Apps in `apps.json` don't launch
+
+The discovery script can't perfectly detect every installer's quirks. Add the app to `manual_apps.json` with the correct path:
+
+```json
+{
+  "appname": {
+    "type": "exe",
+    "path": "C:\\Full\\Path\\To\\app.exe",
+    "args": []
+  }
+}
+```
+
+Some apps need to launch with admin rights (RustDesk's GUI, for instance). Add `"elevated": true` to the entry.
+
+### LLM responses are very slow
+
+First call after Loki sits idle is slow because the model has to load into VRAM. Subsequent calls are fast. Set `OLLAMA_KEEP_ALIVE=2h` in your environment to keep it loaded longer.
+
+If responses are consistently slow even after warmup, the model is probably running on CPU because VRAM is full. Close other GPU-heavy applications (browsers with hardware acceleration count), or run `ollama ps` to see the model's status.
+
+---
+
+## Privacy
+
+Everything runs locally:
+
+- The language model runs through Ollama on your machine
+- Speech recognition uses Whisper locally
+- Text-to-speech uses Piper locally
+- Reminders are stored in a local SQLite file
+- Conversation history is in a local file
+
+The only network connections Loki makes are:
+- To `localhost:11434` (Ollama) — never leaves your machine
+- The initial download of the model and Whisper model files from their respective servers (one-time)
+
+If you ever add the optional calendar integration (not included by default), that would change — Google Calendar or Outlook events would go through their servers. Currently no such integration exists in this codebase.
+
+---
+
+## License
+
+Add your preferred license here (MIT is a reasonable default for personal projects).
+
+---
+
+## Acknowledgments
+
+Loki is built on top of excellent open-source projects:
+
+- [Ollama](https://ollama.com) for local LLM hosting
+- [Qwen](https://github.com/QwenLM/Qwen3) for the language model
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for speech recognition
+- [Piper](https://github.com/rhasspy/piper) for text-to-speech
+- [PySide6](https://wiki.qt.io/Qt_for_Python) for the GUI

@@ -1,0 +1,24 @@
+# Generated files — don't track these
+apps.json
+assistant.db
+chat_history.jsonl
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Voice files (large, user downloads them)
+voices/
+
+# OS
+Thumbs.db
+.DS_Store
