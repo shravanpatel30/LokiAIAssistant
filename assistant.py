@@ -144,6 +144,7 @@ Installed apps:
 
 Rules:
 - For open/close intents, pick the closest matching app from the list above.
+- For browser field, use the lowercase short name from the installed apps list ("chrome", "firefox", "edge"). If no specific browser is mentioned, use JSON null (without quotes), NOT the string "null". Example: {"intent": "open_url", "browser": null, "url": "youtube.com"}
 - "remind me to X at/on/in Y" -> add_reminder with text=X and when=Y.
 - "my anniversary is October 12" or "Sarah's birthday is March 4" -> add_recurring with kind=yearly.
 - "every monday at 9am, X" -> add_recurring with kind=weekly.
@@ -251,7 +252,7 @@ def open_app(name, url_arg=None):
 def open_url(browser, url):
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
-    if browser:
+    if browser and browser not in ("null", "none"):
         return open_app(browser, url_arg=url)
     # No browser specified: use OS default
     import webbrowser
@@ -595,10 +596,13 @@ def handle(user_text):
     if intent == "open_app":
         open_app((parsed.get("app") or "").lower())
     elif intent == "open_url":
-        open_url(
-            (parsed.get("browser") or "").lower() or None,
-            parsed.get("url", ""),
-        )
+        raw_browser = parsed.get("browser")
+        if raw_browser in (None, "", "null", "none", "None", "Null"):
+            browser = None
+        else:
+            browser = raw_browser.lower()
+        url = parsed.get("url", "")
+        open_url(browser, url)
     elif intent == "close_app":
         close_app((parsed.get("app") or "").lower())
     elif intent == "add_reminder":
@@ -644,7 +648,13 @@ def handle_voice(user_text):
         open_app((parsed.get("app") or "").lower())
         if VOICE_OUTPUT: voice.speak(f"Opening {parsed.get('app', 'app')}.")
     elif intent == "open_url":
-        open_url((parsed.get("browser") or "").lower() or None, parsed.get("url", ""))
+        raw_browser = parsed.get("browser")
+        if raw_browser in (None, "", "null", "none", "None", "Null"):
+            browser = None
+        else:
+            browser = raw_browser.lower()
+        url = parsed.get("url", "")
+        open_url(browser, url)
         if VOICE_OUTPUT: voice.speak("Opening it now.")
     elif intent == "close_app":
         close_app((parsed.get("app") or "").lower())
@@ -756,11 +766,16 @@ def handle_window(user_text):
             if _window_bridge:
                 _window_bridge.system_message.emit(f"Opening {app}.")
         elif intent == "open_url":
-            browser = (parsed.get("browser") or "").lower() or None
+            raw_browser = parsed.get("browser")
+            if raw_browser in (None, "", "null", "none", "None", "Null"):
+                browser = None
+            else:
+                browser = raw_browser.lower()
             url = parsed.get("url", "")
             open_url(browser, url)
             if _window_bridge:
-                _window_bridge.system_message.emit(f"Opening {url}{f' in {browser}' if browser else ''}.")
+                location = f"in {browser}" if browser else "in default browser"
+                _window_bridge.system_message.emit(f"Opening {url} {location}.")
         elif intent == "close_app":
             app = (parsed.get("app") or "").lower()
             close_app(app)
