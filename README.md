@@ -8,6 +8,9 @@ Loki is a desktop AI assistant that runs entirely on your own machine. No cloud 
 - Answer general questions and help with coding via a local LLM
 - Listen to push-to-talk voice commands and speak responses
 - Live quietly in your system tray, available whenever you press the hotkey
+- Read PDFs and answer questions about them, with local semantic search (RAG)
+- Convert text and equations to LaTeX
+- A chat window with rendered markdown, code blocks with copy buttons, and drag-and-drop PDF support
 
 Built for Windows. The LLM, speech recognition, and text-to-speech all run locally.
 
@@ -31,6 +34,13 @@ These must be installed before setting up Loki:
 1. **Python 3.10 or newer** — [python.org](https://www.python.org/downloads/). During install, check "Add Python to PATH."
 2. **Ollama** — [ollama.com](https://ollama.com). One-click installer. After install, open a terminal and verify with `ollama --version`.
 3. **A Piper voice model** for text-to-speech (download instructions below).
+
+### Models used
+
+- `qwen3:8b` — the main language model (routing + chat + PDF Q&A + LaTeX)
+- `nomic-embed-text` — embedding model for PDF semantic search
+
+Both run locally through Ollama. Pull both during setup.
 
 ---
 
@@ -66,6 +76,16 @@ ollama pull qwen3:8b
 ```
 
 This downloads ~5 GB. The model is the brain of the assistant — it handles command interpretation and chat.
+
+#### Pull the embedding model (for PDF reading)
+
+Loki uses a local embedding model to search within PDFs:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+This is small (~270 MB) and runs locally. Without it, PDF question-answering won't work.
 
 ### 4. Download a Piper voice
 
@@ -191,6 +211,34 @@ Reminders persist in `assistant.db` (a SQLite file in the project folder). They 
 
 Reminders show Windows toast notifications in the bottom-right corner and appear in your Notification Center.
 
+### Working with PDFs
+
+Attach a PDF in the chat window two ways:
+
+- Type `read C:\path\to\paper.pdf`
+- Drag and drop a PDF file onto the chat window
+
+Once attached, ask questions about it:
+
+- "Summarize the paper"
+- "What method did the authors use?"
+- "What's the error rate they report?"
+
+Loki uses local semantic search to find relevant sections, so it works on long documents. Type `detach` to unload the PDF.
+
+**Note:** PDF question-answering is a research aid, not an authoritative source. The local model can occasionally misread specific numbers or miss details, especially in dense technical papers. Always verify exact values against the original document.
+
+### Converting to LaTeX
+
+Paste text or describe an equation and ask Loki to convert it:
+
+- "convert to latex: the integral from 0 to infinity of x squared e to the minus x dx"
+- "latex this inline: alpha squared plus beta squared"
+
+The result appears in a code block with a copy button. Note: this works on text you paste or describe, not on equations extracted from PDFs (PDF text extraction garbles math notation).
+
+You can customize the LaTeX style by creating a `latex_preferences.md` file in the project folder with your preferences (e.g. "use \dfrac instead of \frac").
+
 ### Chat window
 
 In tray mode, left-click the tray icon to open the chat window. Features:
@@ -211,16 +259,18 @@ loki/
 ├── voice.py                # Whisper (STT) and Piper (TTS)
 ├── db.py                   # SQLite for reminders
 ├── reminders.py            # Scheduler and Windows toasts
+├── pdf_handler.py          # PDF text extraction and attachment state
+├── pdf_rag.py              # Local embeddings and semantic retrieval
 ├── discover_apps.py        # Scans system for installed apps
 ├── manual_apps.json        # Manual app overrides (optional)
-├── apps.json               # Generated app registry (don't edit by hand)
-├── assistant.db            # Reminders database (auto-created on first run)
-├── chat_history.jsonl      # Conversation log (auto-created on first run)
+├── latex_preferences.md    # LaTeX style preferences (optional)
+├── apps.json               # Generated app registry (auto-created)
+├── assistant.db            # Reminders database (auto-created)
+├── chat_history.jsonl      # Conversation log (auto-created)
 ├── AI_Icon.png             # Tray and window icon
 ├── voices/                 # Piper voice files (you download these)
 ├── logs/                   # Daily log files in tray mode (auto-created)
 └── requirements.txt
-
 ---
 
 ## Customization
@@ -249,6 +299,17 @@ If you'd rather Loki only speak when you ask it to, set `VOICE_OUTPUT = False` n
 ### Custom icon
 
 Replace `AI_Icon.png` with your own 256×256 PNG (transparent background, high contrast for visibility at 16×16 in the tray).
+
+### Optional configuration
+
+Loki includes example config files. To use them, copy and edit:
+
+```bash
+copy manual_apps.json.example manual_apps.json
+copy latex_preferences.md.example latex_preferences.md
+```
+
+Then edit the copies with your own app paths and LaTeX style. Both files are optional — Loki works without them.
 
 ---
 

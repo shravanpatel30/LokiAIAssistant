@@ -19,6 +19,10 @@ venv/
 # Voice files (large, user downloads them)
 voices/
 
+# Personal config (users create their own)
+latex_preferences.md
+manual_apps.json
+
 # OS
 Thumbs.db
 .DS_Store

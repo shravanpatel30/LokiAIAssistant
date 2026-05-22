@@ -1,0 +1,4 @@
+Use \left( and \right) for parentheses around tall expressions.
+Use \left[ and \right] for square brackets around tall expressions.
+Use \left{ and \right} for curly brackets around tall expressions.
+Write vectors in bold with \mathbf{}.

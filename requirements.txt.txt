@@ -28,3 +28,6 @@ pystray>=0.19.0
 Pillow>=10.0.0
 PySide6>=6.6.0
 markdown>=3.5.0
+
+# pdf text extraction and summarizing
+pdfplumber>=0.11.0

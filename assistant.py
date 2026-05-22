@@ -17,6 +17,8 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 import chat_window
 import atexit
+import pdf_handler
+import pdf_rag
 
 if sys.platform == "win32":
     import ctypes
@@ -68,9 +70,6 @@ def acquire_lock():
             print(f"Already running (PID {pid}). Exiting.")
             sys.exit(0)
         # else: stale lock, fall through and overwrite it
-
-    with open(LOCKFILE, "w") as f:
-        f.write(str(os.getpid()))
 
     with open(LOCKFILE, "w") as f:
         f.write(str(os.getpid()))
@@ -128,6 +127,9 @@ The intent field MUST be exactly one of these values — no other values are all
 - "list_reminders"  — show all upcoming reminders/events
 - "cancel_reminder" — cancel a reminder by id
 - "chat"            — anything else
+- "attach_pdf"      — load a PDF for the assistant to discuss ("read this PDF", "load paper.pdf")
+- "detach_pdf"      — unload the currently attached PDF ("detach", "forget the pdf", "unload")
+- "to_latex"        — convert pasted text/equations to LaTeX ("convert to latex: ...", "latex this equation")
 
 JSON shapes by intent:
 - {"intent": "open_app", "app": "<name>"}
@@ -138,6 +140,9 @@ JSON shapes by intent:
 - {"intent": "list_reminders"}
 - {"intent": "cancel_reminder", "ids": [<integer>, ...]}
 - {"intent": "chat"}
+- {"intent": "attach_pdf", "path": "<file path from the user's message>"}
+- {"intent": "detach_pdf"}
+- {"intent": "to_latex", "text": "<the text/equation to convert>", "mode": "display|inline"}
 
 Installed apps:
 %APP_LIST%
@@ -159,12 +164,30 @@ Rules:
 - "delete reminders 4, 5, 6" -> {"intent": "cancel_reminder", "ids": [4, 5, 6]} or "delete reminders 4, 5 and 6" -> {"intent": "cancel_reminder", "ids": [4, 5, 6]}
 - "cancel all reminders" -> {"intent": "cancel_reminder", "ids": "all"}
 - For "chat" intent, the JSON is EXACTLY {"intent": "chat"} — no other fields. Do NOT include "response", "message", "answer", or any other fields. Output only the four characters of valid JSON: { " : } and the literal text "intent" and "chat". Stop after the closing brace.
-- Respond with ONLY the JSON. No markdown, no code fences, no commentary."""
+- Respond with ONLY the JSON. No markdown, no code fences, no commentary.
+- "read /path/to/file.pdf", "load this PDF: ...", "open paper.pdf" -> attach_pdf with the path.
+- "detach", "unload pdf", "forget the pdf", "close pdf" -> detach_pdf.
+- For attach_pdf, copy the path EXACTLY as the user wrote it, even if it contains spaces or unusual characters.
+- attach_pdf is ONLY for when the user provides an actual file path with a .pdf extension. Examples that trigger attach_pdf:
+  - "read C:/Users/me/paper.pdf"
+  - "load /home/me/thesis.pdf"
+  - "open ~/Downloads/article.pdf"
+- Do NOT use attach_pdf for these — they are chat:
+  - "summarize this paper" (no path given)
+  - "what does the paper say about X" (no path given)
+  - "tell me about this document" (no path given)
+- If there's already an attached PDF, questions about it without an explicit path are "chat" intent, NOT attach_pdf.
+- For attach_pdf, the path field MUST contain a string ending in .pdf. If no .pdf path is in the message, do not use attach_pdf.
+- "convert to latex: <equation>", "latex this: <text>", "turn this into latex: <text>" -> to_latex with the text after the colon.
+- mode is "inline" if the user says "inline", otherwise "display".
+- Example: "convert to latex: x squared plus y squared" -> {"intent": "to_latex", "text": "x squared plus y squared", "mode": "display"}"""
 
 
 VALID_INTENTS = {
     "open_app", "open_url", "close_app",
     "add_reminder", "add_recurring", "list_reminders", "cancel_reminder",
+    "attach_pdf", "detach_pdf",
+    "to_latex",
     "chat",
 }
 
@@ -286,51 +309,27 @@ DEPTH_TRIGGERS = (
 
 
 def chat(message):
-    # Auto-expand vague depth requests
-    lower = message.lower()
-    if any(trigger in lower for trigger in DEPTH_TRIGGERS):
-        message = (
-            f"{message}\n\n"
-            "(Provide a thorough multi-paragraph answer with concrete examples and mechanisms.)"
-        )
-
-    chat_history.append({"role": "user", "content": message})
-    if len(chat_history) > MAX_HISTORY_TURNS * 2:
-        del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
-
-    t_start = time.perf_counter()
-    t_first_token = None
-    token_count = 0
+    messages = _build_chat_messages(message)
 
     r = requests.post(
         OLLAMA_URL,
-        json={
-            "model": CHAT_MODEL,
-            "messages": chat_history,
-            "stream": True,
-        },
+        json={"model": CHAT_MODEL, "messages": messages, "stream": True, "think": False},
         stream=True,
     )
-
     full_reply = ""
     for line in r.iter_lines():
         if not line:
             continue
         chunk = json.loads(line)
         piece = chunk.get("message", {}).get("content", "")
-        if piece and t_first_token is None:
-            t_first_token = time.perf_counter()
-            print()
         print(piece, end="", flush=True)
         full_reply += piece
-        token_count += 1
         if chunk.get("done"):
             print()
             break
-
-    t_end = time.perf_counter()
-
     chat_history.append({"role": "assistant", "content": full_reply})
+    return full_reply
+
 
 def parse_when(when_str):
     if not when_str:
@@ -572,6 +571,61 @@ def _voice_loop_for_tray(running):
             print(f"Voice loop error: {e}", flush=True)
             is_recording = False
 
+
+LATEX_SYSTEM_PROMPT = """You are a LaTeX conversion tool. Convert the user's input into correct LaTeX.
+
+Rules:
+- Output ONLY the LaTeX code. No explanations, no commentary, no markdown code fences.
+- Use standard LaTeX math notation.
+- For display mode, wrap in \\[ ... \\]. For inline mode, wrap in \\( ... \\).
+- Preserve the mathematical meaning exactly. Do not solve, simplify, or alter the math.
+- Use proper LaTeX commands: \\frac{}{}, \\int, \\sum, \\sqrt{}, Greek letters as \\alpha etc., \\partial, \\nabla, subscripts with _ and superscripts with ^.
+- If the input is already LaTeX, clean it up and fix any errors rather than double-wrapping it."""
+
+LATEX_PREFS_FILE = Path(__file__).parent / "latex_preferences.md"
+
+
+def _load_latex_prefs():
+    if LATEX_PREFS_FILE.exists():
+        return LATEX_PREFS_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
+def convert_to_latex(text, mode="display"):
+    """Convert text/equations to LaTeX. Returns the LaTeX string."""
+    system = LATEX_SYSTEM_PROMPT
+    prefs = _load_latex_prefs()
+    if prefs:
+        system += f"\n\nUser style preferences:\n{prefs}"
+
+    mode_instruction = (
+        "Use display mode: wrap in \\[ ... \\]."
+        if mode == "display"
+        else "Use inline mode: wrap in \\( ... \\)."
+    )
+    user_prompt = f"{mode_instruction}\n\nConvert this to LaTeX:\n{text}"
+
+    r = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": CHAT_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "think": False,
+            "options": {"temperature": 0.1},
+        },
+        timeout=60,
+    )
+    latex = r.json()["message"]["content"].strip()
+    latex = re.sub(r"^```[\w]*\n?", "", latex)
+    latex = re.sub(r"\n?```$", "", latex)
+    return latex.strip()
+
+
+
 # ----------------------------
 # Dispatcher
 # ----------------------------
@@ -617,6 +671,23 @@ def handle(user_text):
         handle_list_reminders()
     elif intent == "cancel_reminder":
         handle_cancel_reminder(parsed.get("ids", []))
+    elif intent == "attach_pdf":
+        path = parsed.get("path", "")
+        if not path or not path.lower().endswith(".pdf"):
+            print("To attach a PDF, give a full path ending in .pdf.")
+        else:
+            try:
+                info = pdf_handler.attach(path)
+                filename = Path(info["path"]).name
+                print(f"Loaded {filename} ({info['pages']} pages, "
+                    f"~{info['estimated_tokens']:,} tokens, {info['chunks']} chunks).")
+            except FileNotFoundError:
+                print(f"File not found: {path}")
+            except Exception as e:
+                print(f"Failed to read PDF: {e}")
+    elif intent == "detach_pdf":
+        was_attached = pdf_handler.detach()
+        print("PDF unloaded." if was_attached else "No PDF was attached.")
     else:
         chat(user_text)
 
@@ -672,6 +743,12 @@ def handle_voice(user_text):
     elif intent == "cancel_reminder":
         handle_cancel_reminder(parsed.get("ids", []))
         if VOICE_OUTPUT: voice.speak("Cancelled.")
+    elif intent == "to_latex":
+        latex, error = handle_to_latex(
+            parsed.get("text", ""),
+            parsed.get("mode", "display"),
+        )
+        print(error if error else f"\n{latex}\n")
     else:
         # Chat — capture full reply, then speak it
         reply = chat_capture(user_text)
@@ -679,15 +756,110 @@ def handle_voice(user_text):
             voice.speak(reply)
 
 
+def handle_attach_pdf(path):
+    # Guard: must be a real .pdf path
+    if not path or not path.lower().endswith(".pdf"):
+        if _window_bridge:
+            _window_bridge.system_message.emit(
+                "To attach a PDF, give me the full file path ending in .pdf. "
+                "Or drag a PDF onto the window."
+            )
+        return
+
+    # Try to load it
+    try:
+        info = pdf_handler.attach(path)
+    except FileNotFoundError:
+        if _window_bridge:
+            _window_bridge.system_message.emit(f"File not found: {path}")
+        return
+    except ValueError as e:
+        if _window_bridge:
+            _window_bridge.system_message.emit(str(e))
+        return
+    except Exception as e:
+        if _window_bridge:
+            _window_bridge.system_message.emit(f"Failed to read PDF: {e}")
+        return
+
+    # Build the confirmation message
+    filename = Path(info["path"]).name
+    msg = (
+        f"Loaded {filename} ({info['pages']} pages, ~{info['estimated_tokens']:,} tokens). "
+        f"Ask me anything about it. Say 'detach' to unload."
+    )
+    if info["truncated"]:
+        msg += (
+            " (Document was long and got truncated — questions about later "
+            "pages may be incomplete.)"
+        )
+
+    # Update status bar and post the message
+    if _window_bridge:
+        _window_bridge.pdf_attached.emit(filename)
+        _window_bridge.system_message.emit(msg)
+
+
+def handle_detach_pdf():
+    was_attached = pdf_handler.detach()
+    if _window_bridge:
+        if was_attached:
+            _window_bridge.pdf_attached.emit("")
+            _window_bridge.system_message.emit("PDF unloaded. Back to general chat.")
+        else:
+            _window_bridge.system_message.emit("No PDF was attached.")
+
+
+def handle_to_latex(text, mode):
+    if not text or not text.strip():
+        return None, "What should I convert? Paste the text or equation."
+    latex = convert_to_latex(text, mode)
+    return latex, None
+
+
+def _build_chat_messages(message):
+    """Build the message list for a chat call, injecting PDF context if attached.
+    Appends the user message to chat_history as a side effect."""
+    if pdf_handler.is_attached():
+        info = pdf_handler.get_info()
+        SUMMARY_TRIGGERS = ("summarize", "summary", "overview", "what is this paper about",
+                            "summarize this paper", "what's this paper about", "tl;dr",
+                            "main points", "key findings", "conclusion")
+        is_summary = any(t in message.lower() for t in SUMMARY_TRIGGERS)
+        if is_summary:
+            context = pdf_handler.get_context()
+        else:
+            relevant_chunks = pdf_rag.retrieve(message)
+            context = "\n\n---\n\n".join(relevant_chunks)
+
+        context_message = (
+            f"You are answering a question about the document '{info['filename']}'. "
+            f"Below are the most relevant excerpts. Answer using ONLY these excerpts. "
+            f"Quote exact numbers and values precisely as written. If the excerpts don't "
+            f"contain the answer, say the document doesn't appear to specify it.\n\n"
+            f"--- RELEVANT EXCERPTS ---\n{context}\n--- END EXCERPTS ---"
+        )
+        chat_history.append({"role": "user", "content": message})
+        if len(chat_history) > MAX_HISTORY_TURNS * 2:
+            del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
+        return [
+            {"role": "system", "content": context_message},
+            {"role": "user", "content": message},
+        ]
+    else:
+        chat_history.append({"role": "user", "content": message})
+        if len(chat_history) > MAX_HISTORY_TURNS * 2:
+            del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
+        return chat_history
+
+
 def chat_capture(message):
     """Like chat() but returns the full reply string instead of just streaming."""
-    chat_history.append({"role": "user", "content": message})
-    if len(chat_history) > MAX_HISTORY_TURNS * 2:
-        del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
+    messages = _build_chat_messages(message)
 
     r = requests.post(
         OLLAMA_URL,
-        json={"model": CHAT_MODEL, "messages": chat_history, "stream": True},
+        json={"model": CHAT_MODEL, "messages": messages, "stream": True, "think": False},
         stream=True,
     )
     full_reply = ""
@@ -704,25 +876,20 @@ def chat_capture(message):
     chat_history.append({"role": "assistant", "content": full_reply})
     return full_reply
 
-def chat_capture_silent(message):
-    """Like chat_capture but doesn't stream to stdout. Returns full reply."""
-    chat_history.append({"role": "user", "content": message})
-    if len(chat_history) > MAX_HISTORY_TURNS * 2:
-        del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
 
+def chat_capture_silent(message):
+    messages = _build_chat_messages(message)
     r = requests.post(
         OLLAMA_URL,
-        json={
-            "model": CHAT_MODEL,
-            "messages": chat_history,
-            "stream": False,
-            "think": False,
-        },
+        json={"model": CHAT_MODEL, "messages": messages, "stream": False, "think": False},
         timeout=120,
     )
     reply = r.json()["message"]["content"]
+    import re
+    reply = re.sub(r'^[\s\'",+\-•·\u0080-\uFFFF]{1,10}(?=[A-Z])', '', reply).strip()
     chat_history.append({"role": "assistant", "content": reply})
     return reply
+
 
 # Module-level reference to the bridge so handlers can post to the window.
 # Set during tray_mode() startup.
@@ -781,6 +948,12 @@ def handle_window(user_text):
             close_app(app)
             if _window_bridge:
                 _window_bridge.system_message.emit(f"Closed {app}.")
+
+        elif intent == "attach_pdf":
+            handle_attach_pdf(parsed.get("path", ""))
+        elif intent == "detach_pdf":
+            handle_detach_pdf()
+
         elif intent == "add_reminder":
             handle_add_reminder(parsed.get("text", ""), parsed.get("when", ""))
             if _window_bridge:
@@ -800,6 +973,16 @@ def handle_window(user_text):
             handle_cancel_reminder(parsed.get("ids", []))
             if _window_bridge:
                 _window_bridge.system_message.emit("Cancelled.")
+        elif intent == "to_latex":
+            latex, error = handle_to_latex(
+                parsed.get("text", ""),
+                parsed.get("mode", "display"),
+            )
+            if _window_bridge:
+                if error:
+                    _window_bridge.system_message.emit(error)
+                else:
+                    _window_bridge.assistant_said.emit(f"```latex\n{latex}\n```")
         else:
             reply = chat_capture_silent(user_text)
             if _window_bridge and reply:

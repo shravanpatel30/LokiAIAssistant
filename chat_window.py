@@ -50,6 +50,7 @@ class ChatBridge(QObject):
     quit_requested = Signal()
     thinking_started = Signal()
     thinking_stopped = Signal()
+    pdf_attached = Signal(str)
 
 
 class ChatWindow(QMainWindow):
@@ -70,6 +71,7 @@ class ChatWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+        self.setAcceptDrops(True)
 
         # Chat history view (read-only)
         self.history_view = QTextBrowser()
@@ -142,6 +144,16 @@ class ChatWindow(QMainWindow):
 
         bridge.thinking_started.connect(self.throbber.start)
         bridge.thinking_stopped.connect(self.throbber.stop)
+
+        bridge.pdf_attached.connect(lambda f: self.set_pdf_status(f if f else None))
+
+        try:
+            import pdf_handler
+            if pdf_handler.is_attached():
+                info = pdf_handler.get_info()
+                self.set_pdf_status(info["filename"])
+        except ImportError:
+            pass
 
         # Load recent history from disk
         self._load_recent_history()
@@ -330,5 +342,29 @@ class ChatWindow(QMainWindow):
                     self._append_message("assistant", text, color="#89b4fa", as_markdown=True)
         except Exception as e:
             print(f"(history read failed: {e})")
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            # Only accept PDFs
+            urls = event.mimeData().urls()
+            if any(u.toLocalFile().lower().endswith(".pdf") for u in urls):
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(".pdf"):
+                # Emit as if the user typed "read <path>"
+                self.submit_requested.emit(f"read {path}")
+                break
+        event.acceptProposedAction()
+
+    def set_pdf_status(self, filename=None):
+        if filename:
+            self.status.setText(f"📄 {filename} attached  •  Ready")
+        else:
+            self.status.setText("Ready")
 
 
