@@ -277,29 +277,29 @@ In tray mode, left-click the tray icon to open the chat window. Features:
 ---
 
 ## Project structure
-loki/
-├── assistant.py            # Main entry point, command dispatch
-├── chat_window.py          # PySide6 chat UI
-├── tray.py                 # System tray icon
-├── voice.py                # Whisper (STT) and Piper (TTS)
-├── db.py                   # SQLite for reminders
-├── reminders.py            # Scheduler and Windows toasts
-├── pdf_handler.py          # PDF text extraction and attachment state
-├── pdf_rag.py              # Local embeddings and semantic retrieval
-├── discover_apps.py        # Scans system for installed apps
-├── manual_apps.json        # Manual app overrides (optional)
-├── latex_preferences.md    # LaTeX style preferences (optional)
-├── apps.json               # Generated app registry (auto-created)
-├── assistant.db            # Reminders database (auto-created)
-├── chat_history.jsonl      # Conversation log (auto-created)
-├── AI_Icon.png             # Tray and window icon
-├── voices/                 # Piper voice files (you download these)
-├── logs/                   # Daily log files in tray mode (auto-created)
-└── requirements.txt
-├── pdf_handler.py          # PDF text extraction and attachment state
-├── pdf_rag.py              # Local embeddings and semantic retrieval
-├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
-├── discover_apps.py        # Scans system for installed apps
+loki/  
+├── assistant.py            # Main entry point, command dispatch  
+├── chat_window.py          # PySide6 chat UI  
+├── tray.py                 # System tray icon  
+├── voice.py                # Whisper (STT) and Piper (TTS)  
+├── db.py                   # SQLite for reminders  
+├── reminders.py            # Scheduler and Windows toasts  
+├── pdf_handler.py          # PDF text extraction and attachment state  
+├── pdf_rag.py              # Local embeddings and semantic retrieval  
+├── discover_apps.py        # Scans system for installed apps  
+├── manual_apps.json        # Manual app overrides (optional)  
+├── latex_preferences.md    # LaTeX style preferences (optional)  
+├── apps.json               # Generated app registry (auto-created)  
+├── assistant.db            # Reminders database (auto-created)  
+├── chat_history.jsonl      # Conversation log (auto-created)  
+├── AI_Icon.png             # Tray and window icon  
+├── voices/                 # Piper voice files (you download these)  
+├── logs/                   # Daily log files in tray mode (auto-created)  
+└── requirements.txt  
+├── pdf_handler.py          # PDF text extraction and attachment state  
+├── pdf_rag.py              # Local embeddings and semantic retrieval  
+├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)  
+├── discover_apps.py        # Scans system for installed apps  
 ---
 
 ## Customization
