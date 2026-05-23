@@ -17,11 +17,17 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 import chat_window
 import atexit
+import tray as tray_module
 import pdf_handler
 import pdf_rag
+import system_info
+from simpleeval import simple_eval
+import math
+import ctypes
+import webbrowser
+import threading
 
 if sys.platform == "win32":
-    import ctypes
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Loki.LocalAssistant.1.0")
 
 LOCKFILE = os.path.join(tempfile.gettempdir(), "loki_assistant.lock")
@@ -33,7 +39,6 @@ def _pid_is_running(pid):
     try:
         if os.name == "nt":
             # Windows: use OpenProcess to check
-            import ctypes
             PROCESS_QUERY_INFORMATION = 0x0400
             handle = ctypes.windll.kernel32.OpenProcess(
                 PROCESS_QUERY_INFORMATION, False, pid
@@ -130,6 +135,7 @@ The intent field MUST be exactly one of these values — no other values are all
 - "attach_pdf"      — load a PDF for the assistant to discuss ("read this PDF", "load paper.pdf")
 - "detach_pdf"      — unload the currently attached PDF ("detach", "forget the pdf", "unload")
 - "to_latex"        — convert pasted text/equations to LaTeX ("convert to latex: ...", "latex this equation")
+- "system_info"     — questions about this computer's status (CPU, RAM, disk, GPU, battery, uptime, IP)
 
 JSON shapes by intent:
 - {"intent": "open_app", "app": "<name>"}
@@ -143,6 +149,7 @@ JSON shapes by intent:
 - {"intent": "attach_pdf", "path": "<file path from the user's message>"}
 - {"intent": "detach_pdf"}
 - {"intent": "to_latex", "text": "<the text/equation to convert>", "mode": "display|inline"}
+- {"intent": "system_info"}
 
 Installed apps:
 %APP_LIST%
@@ -180,7 +187,8 @@ Rules:
 - For attach_pdf, the path field MUST contain a string ending in .pdf. If no .pdf path is in the message, do not use attach_pdf.
 - "convert to latex: <equation>", "latex this: <text>", "turn this into latex: <text>" -> to_latex with the text after the colon.
 - mode is "inline" if the user says "inline", otherwise "display".
-- Example: "convert to latex: x squared plus y squared" -> {"intent": "to_latex", "text": "x squared plus y squared", "mode": "display"}"""
+- Example: "convert to latex: x squared plus y squared" -> {"intent": "to_latex", "text": "x squared plus y squared", "mode": "display"}
+- "how much disk space do I have", "what's my RAM usage", "cpu usage", "battery level", "how long has my PC been on", "what's my IP", "am I running low on memory" -> system_info."""
 
 
 VALID_INTENTS = {
@@ -188,6 +196,7 @@ VALID_INTENTS = {
     "add_reminder", "add_recurring", "list_reminders", "cancel_reminder",
     "attach_pdf", "detach_pdf",
     "to_latex",
+    "system_info",
     "chat",
 }
 
@@ -278,7 +287,6 @@ def open_url(browser, url):
     if browser and browser not in ("null", "none"):
         return open_app(browser, url_arg=url)
     # No browser specified: use OS default
-    import webbrowser
     webbrowser.open(url)
     print(f"Opening {url}")
     return True
@@ -473,7 +481,6 @@ def is_utility_command(text):
 
 def tray_mode():
     acquire_lock()
-    import tray as tray_module
     global _window_bridge  # NEW
 
     reminders.start()
@@ -529,7 +536,6 @@ def tray_mode():
     )
     app.run_in_thread()
 
-    import threading
     voice_thread = threading.Thread(
         target=_voice_loop_for_tray,
         args=(running,),
@@ -625,6 +631,68 @@ def convert_to_latex(text, mode="display"):
     return latex.strip()
 
 
+SYSTEM_INFO_PROMPT = """You are answering a question about the user's computer. \
+Below is the current system data as JSON. Answer the user's specific question \
+concisely using this data. Only mention what they asked about — don't dump every stat \
+unless they asked for a full overview. Use friendly units (GB, %, etc.).
+
+System data:
+%SYSTEM_DATA%"""
+
+
+def handle_system_info(user_text):
+    data = system_info.gather_all()
+    system = SYSTEM_INFO_PROMPT.replace("%SYSTEM_DATA%", json.dumps(data, indent=2))
+    r = requests.post(
+        OLLAMA_URL,
+        json={
+            "model": CHAT_MODEL,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_text},
+            ],
+            "stream": False,
+            "think": False,
+            "options": {"temperature": 0.2},
+        },
+        timeout=60,
+    )
+    return r.json()["message"]["content"].strip()
+
+
+# Allow common math functions/constants in expressions
+_MATH_NAMES = {
+    "pi": math.pi, "e": math.e, "tau": math.tau,
+    "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "log": math.log, "log10": math.log10, "ln": math.log, "exp": math.exp,
+    "abs": abs, "round": round, "floor": math.floor, "ceil": math.ceil,
+    "factorial": math.factorial,
+}
+
+# A pure-math expression: digits, operators, parens, decimal points,
+# and the allowed function/constant names — nothing else.
+_MATH_RE = re.compile(r'^[\d\s+\-*/().,%^]+$')
+
+
+def try_calculator(text):
+    """If text is a pure arithmetic expression, evaluate it. Returns
+    the result string, or None if it's not pure math."""
+    expr = text.strip().rstrip("=?").strip()
+    # Quick reject: must contain a digit and an operator
+    if not re.search(r'\d', expr) or not re.search(r'[+\-*/^%]', expr):
+        return None
+    # Allow function-style expressions too (sqrt(2), sin(0.5), etc.)
+    test = re.sub(r'[a-z_]+', '', expr.lower())  # strip names to check the rest
+    if not _MATH_RE.match(test if test.strip() else "0"):
+        return None
+    try:
+        # simpleeval uses ** for power; convert ^ to **
+        expr_py = expr.replace("^", "**")
+        result = simple_eval(expr_py, names=_MATH_NAMES, functions=_MATH_NAMES)
+        return str(result)
+    except Exception:
+        return None
+
 
 # ----------------------------
 # Dispatcher
@@ -643,6 +711,11 @@ def handle(user_text):
                 db.cancel(r["id"])
                 cleared += 1
         print(f"Cleared {cleared} fired reminder(s).")
+        return
+    # Pure-math shortcut — evaluate locally, skip the LLM entirely
+    calc = try_calculator(user_text)
+    if calc is not None:
+        print(f"= {calc}")
         return
     parsed = classify_intent(user_text)
     intent = parsed.get("intent", "chat")
@@ -688,6 +761,14 @@ def handle(user_text):
     elif intent == "detach_pdf":
         was_attached = pdf_handler.detach()
         print("PDF unloaded." if was_attached else "No PDF was attached.")
+    elif intent == "to_latex":
+        latex, error = handle_to_latex(
+            parsed.get("text", ""),
+            parsed.get("mode", "display"),
+        )
+        print(error if error else f"\n{latex}\n")
+    elif intent == "system_info":
+        print(handle_system_info(user_text))
     else:
         chat(user_text)
 
@@ -709,6 +790,12 @@ def handle_voice(user_text):
     if cmd == "reset":
         chat_history.clear()
         print("(chat history cleared)")
+        return
+    calc = try_calculator(user_text)
+    if calc is not None:
+        print(f"= {calc}")
+        if VOICE_OUTPUT:
+            voice.speak(f"That's {calc}")
         return
 
     parsed = classify_intent(user_text)
@@ -743,12 +830,11 @@ def handle_voice(user_text):
     elif intent == "cancel_reminder":
         handle_cancel_reminder(parsed.get("ids", []))
         if VOICE_OUTPUT: voice.speak("Cancelled.")
-    elif intent == "to_latex":
-        latex, error = handle_to_latex(
-            parsed.get("text", ""),
-            parsed.get("mode", "display"),
-        )
-        print(error if error else f"\n{latex}\n")
+    elif intent == "system_info":
+        reply = handle_system_info(user_text)
+        print(reply)
+        if VOICE_OUTPUT:
+            voice.speak(reply)
     else:
         # Chat — capture full reply, then speak it
         reply = chat_capture(user_text)
@@ -885,7 +971,6 @@ def chat_capture_silent(message):
         timeout=120,
     )
     reply = r.json()["message"]["content"]
-    import re
     reply = re.sub(r'^[\s\'",+\-•·\u0080-\uFFFF]{1,10}(?=[A-Z])', '', reply).strip()
     chat_history.append({"role": "assistant", "content": reply})
     return reply
@@ -922,6 +1007,12 @@ def handle_window(user_text):
 
     if _window_bridge:
         _window_bridge.thinking_started.emit()
+
+    calc = try_calculator(user_text)
+    if calc is not None:
+        if _window_bridge:
+            _window_bridge.system_message.emit(f"= {calc}")
+        return
 
     try:
         parsed = classify_intent(user_text)
@@ -983,6 +1074,10 @@ def handle_window(user_text):
                     _window_bridge.system_message.emit(error)
                 else:
                     _window_bridge.assistant_said.emit(f"```latex\n{latex}\n```")
+        elif intent == "system_info":
+            reply = handle_system_info(user_text)
+            if _window_bridge and reply:
+                _window_bridge.assistant_said.emit(reply)
         else:
             reply = chat_capture_silent(user_text)
             if _window_bridge and reply:

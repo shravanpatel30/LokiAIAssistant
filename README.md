@@ -5,6 +5,8 @@ Loki is a desktop AI assistant that runs entirely on your own machine. No cloud 
 - Open apps and websites by voice or text ("open Spotify", "go to youtube.com in Chrome")
 - Set reminders with natural-language times ("remind me in 30 minutes to check the oven")
 - Schedule recurring events (birthdays, anniversaries, weekly tasks)
+- Answer questions about your computer's status (CPU, RAM, disk, battery, uptime, local IP)
+- Evaluate arithmetic expressions instantly and locally
 - Answer general questions and help with coding via a local LLM
 - Listen to push-to-talk voice commands and speak responses
 - Live quietly in your system tray, available whenever you press the hotkey
@@ -239,6 +241,29 @@ The result appears in a code block with a copy button. Note: this works on text 
 
 You can customize the LaTeX style by creating a `latex_preferences.md` file in the project folder with your preferences (e.g. "use \dfrac instead of \frac").
 
+### System information
+
+Ask about your computer's current status:
+
+- "How much disk space do I have?"
+- "What's my RAM usage?"
+- "Am I running low on memory?"
+- "What's my battery at?"
+- "How long has my PC been on?"
+- "What's my local IP?"
+
+Loki gathers the data locally and answers in plain language. It interprets the numbers too — asking "am I running low on memory?" gets a judgment, not just a percentage.
+
+### Quick calculations
+
+Type a pure arithmetic expression and Loki evaluates it instantly without involving the language model:
+
+- `27 * 4500 * 0.27`
+- `sqrt(2) + pi`
+- `2^10`
+
+Supported functions include sqrt, sin, cos, tan, log, ln, exp, abs, round, floor, ceil, factorial, and constants pi, e, tau. For word-based math questions ("what's the molar mass of glucose?"), Loki uses the language model instead.
+
 ### Chat window
 
 In tray mode, left-click the tray icon to open the chat window. Features:
@@ -271,6 +296,10 @@ loki/
 ├── voices/                 # Piper voice files (you download these)
 ├── logs/                   # Daily log files in tray mode (auto-created)
 └── requirements.txt
+├── pdf_handler.py          # PDF text extraction and attachment state
+├── pdf_rag.py              # Local embeddings and semantic retrieval
+├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
+├── discover_apps.py        # Scans system for installed apps
 ---
 
 ## Customization

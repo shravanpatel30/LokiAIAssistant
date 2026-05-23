@@ -31,3 +31,9 @@ markdown>=3.5.0
 
 # pdf text extraction and summarizing
 pdfplumber>=0.11.0
+
+# System info queries
+psutil>=5.9.0
+
+# Calculator (safe expression evaluation)
+simpleeval>=0.9.13
