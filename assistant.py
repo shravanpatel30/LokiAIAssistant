@@ -26,6 +26,7 @@ import math
 import ctypes
 import webbrowser
 import threading
+import symbolic_math
 
 if sys.platform == "win32":
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Loki.LocalAssistant.1.0")
@@ -692,7 +693,7 @@ def try_calculator(text):
         return str(result)
     except Exception:
         return None
-
+    
 
 # ----------------------------
 # Dispatcher
@@ -717,6 +718,13 @@ def handle(user_text):
     if calc is not None:
         print(f"= {calc}")
         return
+    
+    calc_cmd = symbolic_math.parse_calculus_command(user_text)
+    if calc_cmd is not None:
+        body, error = symbolic_math.run(calc_cmd)
+        print(error if error else body)
+        return
+    
     parsed = classify_intent(user_text)
     intent = parsed.get("intent", "chat")
 
@@ -1012,6 +1020,14 @@ def handle_window(user_text):
     if calc is not None:
         if _window_bridge:
             _window_bridge.system_message.emit(f"= {calc}")
+        return
+    
+    calc_cmd = symbolic_math.parse_calculus_command(user_text)
+    if calc_cmd is not None:
+        body, error = symbolic_math.run(calc_cmd)
+        if _window_bridge:
+            _window_bridge.system_message.emit(error) if error else \
+                _window_bridge.assistant_said.emit(body)
         return
 
     try:

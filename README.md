@@ -264,6 +264,18 @@ Type a pure arithmetic expression and Loki evaluates it instantly without involv
 
 Supported functions include sqrt, sin, cos, tan, log, ln, exp, abs, round, floor, ceil, factorial, and constants pi, e, tau. For word-based math questions ("what's the molar mass of glucose?"), Loki uses the language model instead.
 
+### Symbolic calculus
+
+Loki does exact symbolic math via SymPy:
+
+- `integrate x^2`
+- `integrate x*exp(x) from 0 to 1` (definite)
+- `differentiate x^2 * sin(x)`
+- `diff x^3 at 2` (evaluates the derivative at a point)
+- `integrate \frac{1}{1+x^2}` (LaTeX input works too)
+
+Results are exact and come back as LaTeX you can copy into a paper. Unlike the chat model, SymPy's answers are mathematically guaranteed correct. Note that integrals without an elementary closed form return special functions (e.g. erf, Si) — that's correct, not an error.
+
 ### Chat window
 
 In tray mode, left-click the tray icon to open the chat window. Features:
@@ -277,29 +289,30 @@ In tray mode, left-click the tray icon to open the chat window. Features:
 ---
 
 ## Project structure
-loki/  
-├── assistant.py            # Main entry point, command dispatch  
-├── chat_window.py          # PySide6 chat UI  
-├── tray.py                 # System tray icon  
-├── voice.py                # Whisper (STT) and Piper (TTS)  
-├── db.py                   # SQLite for reminders  
-├── reminders.py            # Scheduler and Windows toasts  
-├── pdf_handler.py          # PDF text extraction and attachment state  
-├── pdf_rag.py              # Local embeddings and semantic retrieval  
-├── discover_apps.py        # Scans system for installed apps  
-├── manual_apps.json        # Manual app overrides (optional)  
-├── latex_preferences.md    # LaTeX style preferences (optional)  
-├── apps.json               # Generated app registry (auto-created)  
-├── assistant.db            # Reminders database (auto-created)  
-├── chat_history.jsonl      # Conversation log (auto-created)  
-├── AI_Icon.png             # Tray and window icon  
-├── voices/                 # Piper voice files (you download these)  
-├── logs/                   # Daily log files in tray mode (auto-created)  
-└── requirements.txt  
-├── pdf_handler.py          # PDF text extraction and attachment state  
-├── pdf_rag.py              # Local embeddings and semantic retrieval  
-├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)  
-├── discover_apps.py        # Scans system for installed apps  
+
+```text
+loki/
+├── assistant.py            # Main entry point, command dispatch
+├── chat_window.py          # PySide6 chat UI
+├── tray.py                 # System tray icon
+├── voice.py                # Whisper (STT) and Piper (TTS)
+├── db.py                   # SQLite for reminders
+├── reminders.py            # Scheduler and Windows toasts
+├── pdf_handler.py          # PDF text extraction and attachment state
+├── pdf_rag.py              # Local embeddings and semantic retrieval
+├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
+├── symbolic_math.py        # For performing symbolic math using sympy
+├── discover_apps.py        # Scans system for installed apps
+├── manual_apps.json        # Manual app overrides (optional)
+├── latex_preferences.md    # LaTeX style preferences (optional)
+├── apps.json               # Generated app registry (auto-created)
+├── assistant.db            # Reminders database (auto-created)
+├── chat_history.jsonl      # Conversation log (auto-created)
+├── AI_Icon.png             # Tray and window icon
+├── voices/                 # Piper voice files (you download these)
+├── logs/                   # Daily log files in tray mode (auto-created)
+└── requirements.txt
+``` 
 ---
 
 ## Customization

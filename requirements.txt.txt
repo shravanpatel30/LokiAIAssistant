@@ -37,3 +37,7 @@ psutil>=5.9.0
 
 # Calculator (safe expression evaluation)
 simpleeval>=0.9.13
+
+# Symbolic math (calculus)
+sympy>=1.12
+antlr4-python3-runtime==4.11
