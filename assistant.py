@@ -165,7 +165,7 @@ Rules:
   - "text" gets only what to remind about (no time)
   - "when" gets only the time phrase, copied from the user's message
   - Example: "remind me to call mom tomorrow at 5pm" -> {"intent": "add_reminder", "text": "call mom", "when": "tomorrow at 5pm"}
-- Copy time phrases from the user's message faithfully. If they wrote "in 30 secs", put "in 30 secs" — not "30 minutes" or "in half a minute".
+- Copy time phrases from the user's message faithfully. If they wrote "in 30 secs", put "in 30 secs" — not "30 minutes" or "in half a minute", but normalize common decimal-time notations: "9.20 pm" -> "9:20 pm", "5.30" -> "5:30", "9 27 pm" -> "9:27 pm". Use colons, NOT any other delimiter between hours and minutes.
 - "what reminders do I have", "show my reminders", "list events" -> list_reminders.
 - "cancel reminder 3", "delete reminder 5" -> cancel_reminder with the number as id.
 - "cancel reminder 3" -> {"intent": "cancel_reminder", "ids": [3]}
@@ -343,6 +343,7 @@ def chat(message):
 def parse_when(when_str):
     if not when_str:
         return None
+    when_str = _normalize_time_string(when_str)
     return dateparser.parse(
         when_str,
         settings={
@@ -352,38 +353,59 @@ def parse_when(when_str):
     )
 
 
+def _normalize_time_string(s):
+    """Fix common Whisper transcription artifacts in spoken times.
+    Converts patterns like '9 27 pm', '9.27 pm', '9,27 pm', '9-27 pm' to '9:27 pm'."""
+    # Match: 1-2 digits, any non-alphanumeric separator(s), exactly 2 digits, then am/pm
+    s = re.sub(
+        r'\b(\d{1,2})[^\w]+(\d{2})\s*(a\.?m\.?|p\.?m\.?)\b',
+        r'\1:\2 \3',
+        s,
+        flags=re.IGNORECASE,
+    )
+    return s
+
+
 def handle_add_reminder(text, when_str):
     fire_at = parse_when(when_str)
     if not fire_at:
-        print(f"Couldn't understand the time '{when_str}'. Try 'in 5 minutes', 'tomorrow at 8pm', etc.")
-        return
+        msg = f"Couldn't understand the time '{when_str}'. Try 'in 5 minutes', 'tomorrow at 8pm', etc."
+        print(msg)
+        return False, msg
     if fire_at <= datetime.now():
-        print(f"That time ({fire_at}) is already past.")
-        return
+        msg = f"That time ({fire_at.strftime('%a %b %d at %I:%M %p')}) is already past."
+        print(msg)
+        return False, msg
     text = text.strip()
     if text.lower().startswith("to "):
         text = text[3:]
     if not text:
         text = "(unspecified)"
     rid = reminders.add_and_schedule(text, fire_at, kind="once")
-    print(f"✓ Reminder #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}")
+    msg = f"✓ Reminder #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}"
+    print(msg)
+    return True, msg
 
 
 def handle_add_recurring(text, when_str, kind):
     if kind not in ("yearly", "monthly", "weekly", "daily"):
-        print(f"Unknown recurrence kind '{kind}'.")
-        return
+        msg = f"Unknown recurrence kind '{kind}'."
+        print(msg)
+        return False, msg
     fire_at = parse_when(when_str)
     if not fire_at:
-        print(f"Couldn't understand '{when_str}'.")
-        return
+        msg = f"Couldn't understand '{when_str}'."
+        print(msg)
+        return False, msg
     if fire_at <= datetime.now() and kind == "yearly":
         fire_at = fire_at.replace(year=datetime.now().year + 1)
     text = text.strip()
     if not text:
         text = "(unspecified)"
     rid = reminders.add_and_schedule(text, fire_at, kind=kind)
-    print(f"✓ Recurring ({kind}) #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}")
+    msg = f"✓ Recurring ({kind}) #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}"
+    print(msg)
+    return True, msg
 
 
 def handle_list_reminders():
@@ -1062,16 +1084,16 @@ def handle_window(user_text):
             handle_detach_pdf()
 
         elif intent == "add_reminder":
-            handle_add_reminder(parsed.get("text", ""), parsed.get("when", ""))
+            success, msg = handle_add_reminder(parsed.get("text", ""), parsed.get("when", ""))
             if _window_bridge:
-                _window_bridge.system_message.emit("Reminder set.")
+                _window_bridge.system_message.emit(msg)
         elif intent == "add_recurring":
-            handle_add_recurring(
+            success, msg = handle_add_recurring(
                 parsed.get("text", ""), parsed.get("when", ""),
                 parsed.get("kind", "yearly"),
             )
             if _window_bridge:
-                _window_bridge.system_message.emit("Recurring reminder set.")
+                _window_bridge.system_message.emit(msg)
         elif intent == "list_reminders":
             text = format_reminders_for_display()
             if _window_bridge:

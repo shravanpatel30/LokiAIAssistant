@@ -8,15 +8,14 @@ import db
 
 # ---- Notification ----
 def show_toast(title, body):
-    """Windows 10/11 toast notification."""
     try:
-        from windows_toasts import Toast, WindowsToaster
+        from windows_toasts import Toast, WindowsToaster, ToastScenario
         toaster = WindowsToaster("Local Assistant")
         toast = Toast()
         toast.text_fields = [title, body]
+        toast.scenario = ToastScenario.Reminder   # keeps the toast persistent
         toaster.show_toast(toast)
     except Exception as e:
-        # Fallback: print loudly. Better than failing silently.
         print(f"\n\n*** REMINDER: {title} — {body} ***\n", flush=True)
         print(f"(toast failed: {e})", flush=True)
 
