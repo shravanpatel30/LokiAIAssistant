@@ -2,22 +2,41 @@
 import atexit
 from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
-
+import winsound
 import db
 
 
 # ---- Notification ----
+# Display callback — set by the assistant at startup
+_display_callback = None
+
+
+def set_display_callback(callback):
+    """Register a function (title, body) -> None for showing reminders.
+    If never set, reminders just print to stderr."""
+    global _display_callback
+    _display_callback = callback
+
+
 def show_toast(title, body):
+    """Fire a reminder. Uses the registered callback if available,
+    falls back to print otherwise."""
+    # Audio cue
     try:
-        from windows_toasts import Toast, WindowsToaster, ToastScenario
-        toaster = WindowsToaster("Local Assistant")
-        toast = Toast()
-        toast.text_fields = [title, body]
-        toast.scenario = ToastScenario.Reminder   # keeps the toast persistent
-        toaster.show_toast(toast)
-    except Exception as e:
-        print(f"\n\n*** REMINDER: {title} — {body} ***\n", flush=True)
-        print(f"(toast failed: {e})", flush=True)
+        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+    except Exception:
+        pass
+
+    # Try the registered callback first
+    if _display_callback is not None:
+        try:
+            _display_callback(title, body)
+            return
+        except Exception as e:
+            print(f"(display callback failed: {e})", flush=True)
+
+    # Fallback
+    print(f"\n\n*** REMINDER: {title} — {body} ***\n", flush=True)
 
 # ---- Scheduler ----
 scheduler = BackgroundScheduler(

@@ -3,20 +3,163 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QObject, QTimer
+from PySide6.QtCore import (Qt, Signal, QObject, QTimer,
+    QPropertyAnimation, QEasingCurve, QRect)
 from PySide6.QtGui import (
     QTextCursor, QKeySequence, QShortcut, QFont,
-    QTextBlockFormat, QIcon
+    QTextBlockFormat, QIcon, QFontDatabase
 )
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTextEdit, QTextBrowser, QLineEdit, QPushButton, QLabel,
+    QTextEdit, QTextBrowser, QLineEdit, QPushButton, QLabel, QFrame
 )
 import markdown
 
 HISTORY_FILE = Path(__file__).parent / "chat_history.jsonl"
 WINDOW_HISTORY_LIMIT = 50  # messages kept in the visible window
 DISK_HISTORY_LIMIT = 1000  # most recent N messages persisted
+
+
+class ReminderPopup(QWidget):
+    """Bottom-right notification popup with top accent bar and fade-in."""
+
+    ACCENT_COLOR = "#534AB7"
+
+    def __init__(self, title, body):
+        super().__init__(
+            None,
+            Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool,
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setMinimumSize(520, 220)
+        self.resize(520, 220)
+
+        self.setStyleSheet(f"""
+            QWidget#popupRoot {{
+                background-color: #1a1a1d;
+                border-radius: 12px;
+            }}
+            QFrame#accentBar {{
+                background-color: {self.ACCENT_COLOR};
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+            }}
+            QLabel#labelText {{
+                color: #8a8a92;
+                font-size: 10pt;
+                letter-spacing: 1px;
+            }}
+            QLabel#titleText {{
+                color: #E3E3E3;
+                font-size: 16pt;
+                font-weight: 600;
+            }}
+            QLabel#bodyText {{
+                color: #c0c0c8;
+                font-size: 12pt;
+            }}
+            QLabel#timeText {{
+                color: #6c6c76;
+                font-size: 12pt;
+            }}
+            QPushButton#dismissBtn {{
+                background-color: {self.ACCENT_COLOR};
+                color: #ffffff;
+                font-size: 14px;
+                font-weight: 500;
+                border: none;
+                border-radius: 8px;
+                padding: 0 24px;
+                min-height: 40px;
+            }}
+            QPushButton#dismissBtn:hover {{
+                background-color: #6359C9;
+            }}
+        """)
+
+        # Root widget — needed to apply rounded corners cleanly
+        root = QWidget(self)
+        root.setObjectName("popupRoot")
+        root.setGeometry(0, 0, 520, 220)
+
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        # Top accent bar (4px)
+        accent = QFrame()
+        accent.setObjectName("accentBar")
+        accent.setFixedHeight(4)
+        outer.addWidget(accent)
+
+        # Content area
+        content = QVBoxLayout()
+        content.setContentsMargins(24, 20, 24, 18)
+        content.setSpacing(8)
+
+        # Header: bell emoji + "REMINDER" label
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        bell = QLabel("🔔")
+        bell.setFont(QFont("Segoe UI Emoji", 16))
+        label = QLabel("REMINDER")
+        label.setObjectName("labelText")
+        header.addWidget(bell)
+        header.addWidget(label)
+        header.addStretch()
+        content.addLayout(header)
+
+        # Title text (the actual reminder body, larger)
+        title_label = QLabel(body)
+        title_label.setObjectName("titleText")
+        title_label.setWordWrap(True)
+        content.addWidget(title_label)
+
+        content.addStretch()
+
+        # Bottom row: time on left, button on right
+        bottom = QHBoxLayout()
+        time_str = self._format_time()
+        time_label = QLabel(f"🕓  {time_str}")
+        time_label.setObjectName("timeText")
+        bottom.addWidget(time_label)
+        bottom.addStretch()
+
+        dismiss = QPushButton("Dismiss")
+        dismiss.setObjectName("dismissBtn")
+        dismiss.clicked.connect(self.close)
+        dismiss.setCursor(Qt.PointingHandCursor)
+        bottom.addWidget(dismiss)
+
+        content.addLayout(bottom)
+        outer.addLayout(content)
+
+        self._position_bottom_right()
+        self._fade_in()
+
+    def _format_time(self):
+        now = datetime.now()
+        today = now.date()
+        if now.date() == today:
+            return f"Today {now.strftime('%I:%M %p').lstrip('0')}"
+        return now.strftime("%a %b %d %I:%M %p")
+
+    def _position_bottom_right(self):
+        screen = QApplication.primaryScreen().availableGeometry()
+        margin = 20
+        x = screen.right() - self.width() - margin
+        y = screen.bottom() - self.height() - margin
+        self.move(x, y)
+
+    def _fade_in(self):
+        self.setWindowOpacity(0.0)
+        self._fade_animation = QPropertyAnimation(self, b"windowOpacity")
+        self._fade_animation.setDuration(220)
+        self._fade_animation.setStartValue(0.0)
+        self._fade_animation.setEndValue(1.0)
+        self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
+        self._fade_animation.start()
+        
 
 class Throbber:
     """Cycles status text to show the assistant is working."""
@@ -51,6 +194,7 @@ class ChatBridge(QObject):
     thinking_started = Signal()
     thinking_stopped = Signal()
     pdf_attached = Signal(str)
+    reminder_fired = Signal(str, str)   # title, body
 
 
 class ChatWindow(QMainWindow):

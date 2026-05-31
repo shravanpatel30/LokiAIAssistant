@@ -515,6 +515,11 @@ def tray_mode():
     _window_bridge = bridge  # NEW — handlers can now post to the window
     window = chat_window.ChatWindow(bridge)
 
+    # We emit a signal so the popup is created on the GUI thread.
+    def display_reminder(title, body):
+        bridge.reminder_fired.emit(title, body)
+    reminders.set_display_callback(display_reminder)
+
     def _show_window():
         window.show()
         window.raise_()
@@ -526,7 +531,25 @@ def tray_mode():
     bridge.show_window_requested.connect(_show_window)
     bridge.quit_requested.connect(_do_quit)
 
-    # NEW: when user types in the window, route to handler
+    _active_popups = []  # keep references so they don't get garbage collected
+
+    def _show_reminder_popup(title, body):
+        try:
+            popup = chat_window.ReminderPopup(title, body)
+            _active_popups.append(popup)
+            popup.destroyed.connect(
+                lambda: _active_popups.remove(popup) if popup in _active_popups else None
+            )
+            popup.show()
+            popup.raise_()
+            popup.activateWindow()
+        except Exception as e:
+            import traceback
+            print(f"[POPUP] FAILED: {e}", flush=True)
+            traceback.print_exc()
+
+    bridge.reminder_fired.connect(_show_reminder_popup)
+
     def _on_submit(text):
         bridge.user_said.emit(text)  # show user message in window immediately
         # Run the handler in a worker thread so the GUI stays responsive
