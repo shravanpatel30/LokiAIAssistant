@@ -8,9 +8,6 @@ dateparser>=1.2.0
 # Scheduler for reminders
 APScheduler>=3.10.0
 
-# Windows toast notifications
-windows-toasts>=1.0.0
-
 # Voice input (speech-to-text)
 faster-whisper>=1.0.0
 sounddevice>=0.4.6

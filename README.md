@@ -211,7 +211,7 @@ These work in any mode and don't go through the LLM:
 
 Reminders persist in `assistant.db` (a SQLite file in the project folder). They survive restarts. If Loki was off when a reminder was due, it fires when you next launch.
 
-Reminders show Windows toast notifications in the bottom-right corner and appear in your Notification Center.
+Reminders show a custom-styled popup in the bottom-right of your primary monitor and stays on top until you dismiss it. A sound plays alongside.
 
 ### Working with PDFs
 
@@ -297,7 +297,7 @@ loki/
 ├── tray.py                 # System tray icon
 ├── voice.py                # Whisper (STT) and Piper (TTS)
 ├── db.py                   # SQLite for reminders
-├── reminders.py            # Scheduler and Windows toasts
+├── reminders.py            # Scheduler and custom-styled popup reminders
 ├── pdf_handler.py          # PDF text extraction and attachment state
 ├── pdf_rag.py              # Local embeddings and semantic retrieval
 ├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
@@ -373,9 +373,9 @@ Loki will still work on a midrange laptop with no dedicated GPU — just slower.
 
 A previous instance is still running. Check your system tray for the Loki icon and right-click → Quit. If the tray icon isn't visible, open Task Manager, find `python.exe` or `pythonw.exe`, and end the process. Then delete `%TEMP%\loki.lock` if it persists.
 
-### Toasts don't appear
+### Reminder popup doesn't appear
 
-Check Windows notification settings: Settings → System → Notifications. Make sure notifications are enabled globally and not muted for Python.
+The popup needs Loki running in tray mode (in text/voice mode, reminders fall back to printed text in the terminal).
 
 ### "Couldn't understand the time"
 
