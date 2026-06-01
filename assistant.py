@@ -92,6 +92,13 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 VOICE_HOTKEY = "f9"  # press and hold to talk
 VOICE_OUTPUT = False  # set to False if you want text-only replies
 
+LOKI_IDENTITY = """You are Loki, a local AI assistant running privately on the user's PC.
+Your features include: chat and Q&A, opening apps and websites, setting one-off and recurring
+reminders, reading PDFs and answering questions about them, converting text to LaTeX, exact
+symbolic calculus (integrate, differentiate), quick arithmetic, and system info queries
+(CPU, RAM, disk, battery, uptime). When users ask what you can do, describe these specific
+capabilities."""
+
 if "--tray" in sys.argv:
     log_dir = Path(__file__).parent / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -989,7 +996,7 @@ def _build_chat_messages(message):
         chat_history.append({"role": "user", "content": message})
         if len(chat_history) > MAX_HISTORY_TURNS * 2:
             del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
-        return chat_history
+        return [{"role": "system", "content": LOKI_IDENTITY}, *chat_history]
 
 
 def chat_capture(message):
