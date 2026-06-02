@@ -27,6 +27,7 @@ import ctypes
 import webbrowser
 import threading
 import symbolic_math
+from urllib.parse import quote_plus
 
 if sys.platform == "win32":
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Loki.LocalAssistant.1.0")
@@ -93,7 +94,8 @@ VOICE_HOTKEY = "f9"  # press and hold to talk
 VOICE_OUTPUT = False  # set to False if you want text-only replies
 
 LOKI_IDENTITY = """You are Loki, a local AI assistant running privately on the user's PC.
-Your features include: chat and Q&A, opening apps and websites, setting one-off and recurring
+Your features include: chat and Q&A, **searching the web (Google,
+Maps, YouTube, Wikipedia, etc.)**, opening apps and websites, setting one-off and recurring
 reminders, reading PDFs and answering questions about them, converting text to LaTeX, exact
 symbolic calculus (integrate, differentiate), quick arithmetic, and system info queries
 (CPU, RAM, disk, battery, uptime). When users ask what you can do, describe these specific
@@ -144,6 +146,7 @@ The intent field MUST be exactly one of these values — no other values are all
 - "detach_pdf"      — unload the currently attached PDF ("detach", "forget the pdf", "unload")
 - "to_latex"        — convert pasted text/equations to LaTeX ("convert to latex: ...", "latex this equation")
 - "system_info"     — questions about this computer's status (CPU, RAM, disk, GPU, battery, uptime, IP)
+- "web_search"      — search a service like Google, Maps, YouTube, Wikipedia for something
 
 JSON shapes by intent:
 - {"intent": "open_app", "app": "<name>"}
@@ -158,6 +161,7 @@ JSON shapes by intent:
 - {"intent": "detach_pdf"}
 - {"intent": "to_latex", "text": "<the text/equation to convert>", "mode": "display|inline"}
 - {"intent": "system_info"}
+- {"intent": "web_search", "service": "<google|maps|youtube|wikipedia|amazon|github|stackoverflow|images>", "query": "<the search query>", "browser": "<browser name or null>"}
 
 Installed apps:
 %APP_LIST%
@@ -196,7 +200,17 @@ Rules:
 - "convert to latex: <equation>", "latex this: <text>", "turn this into latex: <text>" -> to_latex with the text after the colon.
 - mode is "inline" if the user says "inline", otherwise "display".
 - Example: "convert to latex: x squared plus y squared" -> {"intent": "to_latex", "text": "x squared plus y squared", "mode": "display"}
-- "how much disk space do I have", "what's my RAM usage", "cpu usage", "battery level", "how long has my PC been on", "what's my IP", "am I running low on memory" -> system_info."""
+- "how much disk space do I have", "what's my RAM usage", "cpu usage", "battery level", "how long has my PC been on", "what's my IP", "am I running low on memory" -> system_info.
+- "open the map of <X>", "show me <X> on maps", "find <X> on google maps" -> web_search with service="maps".
+- "search youtube for <X>", "find <X> on youtube" -> web_search with service="youtube".
+- "look up <X> on wikipedia", "wikipedia <X>" -> web_search with service="wikipedia".
+- "google <X>", "search for <X>", "search google for <X>" -> web_search with service="google".
+- "find <X> on amazon" -> web_search with service="amazon".
+- "search github for <X>" -> web_search with service="github".
+- "find images of <X>", "google images of <X>" -> web_search with service="images".
+- The browser field is ONLY for when the user explicitly names a browser ("in chrome", "on firefox", "using edge"). If the user does not name a specific browser, set browser to null. Do NOT default to "chrome" or any other browser. The user's system default browser will be used when browser is null.
+- Always include the browser field in the JSON, even when null. Example: {"intent": "web_search", "service": "maps", "query": "...", "browser": null}
+- For the query field, strip the search-command words and keep only the subject. Example: "open the map of chicago illinois in chrome" -> service="maps", query="chicago illinois", browser="chrome"."""
 
 
 VALID_INTENTS = {
@@ -205,6 +219,7 @@ VALID_INTENTS = {
     "attach_pdf", "detach_pdf",
     "to_latex",
     "system_info",
+    "web_search",
     "chat",
 }
 
@@ -747,6 +762,30 @@ def try_calculator(text):
         return None
     
 
+SEARCH_SERVICES = {
+    "google":        "https://www.google.com/search?q={q}",
+    "maps":          "https://www.google.com/maps/search/{q}",
+    "youtube":       "https://www.youtube.com/results?search_query={q}",
+    "wikipedia":     "https://en.wikipedia.org/wiki/Special:Search?search={q}",
+    "amazon":        "https://www.amazon.com/s?k={q}",
+    "github":        "https://github.com/search?q={q}",
+    "stackoverflow": "https://stackoverflow.com/search?q={q}",
+    "images":        "https://www.google.com/search?tbm=isch&q={q}",
+}
+
+
+def handle_web_search(service, query, browser):
+    if not query or not query.strip():
+        return False, "What should I search for?"
+    service = (service or "google").lower()
+    if service not in SEARCH_SERVICES:
+        return False, f"Don't know the service '{service}'. Try google, maps, youtube, wikipedia, amazon, github, stackoverflow, or images."
+
+    url = SEARCH_SERVICES[service].format(q=quote_plus(query.strip()))
+    open_url(browser, url)
+    return True, f"Searching {service} for '{query}'."
+    
+
 # ----------------------------
 # Dispatcher
 # ----------------------------
@@ -829,6 +868,15 @@ def handle(user_text):
         print(error if error else f"\n{latex}\n")
     elif intent == "system_info":
         print(handle_system_info(user_text))
+    elif intent == "web_search":
+        raw_browser = parsed.get("browser")
+        browser = None if raw_browser in (None, "", "null", "none", "None", "Null") else raw_browser.lower()
+        success, msg = handle_web_search(
+            parsed.get("service"),
+            parsed.get("query", ""),
+            browser,
+        )
+        print(msg)
     else:
         chat(user_text)
 
@@ -895,6 +943,16 @@ def handle_voice(user_text):
         print(reply)
         if VOICE_OUTPUT:
             voice.speak(reply)
+    elif intent == "web_search":
+        raw_browser = parsed.get("browser")
+        browser = None if raw_browser in (None, "", "null", "none", "None", "Null") else raw_browser.lower()
+        success, msg = handle_web_search(
+            parsed.get("service"),
+            parsed.get("query", ""),
+            browser,
+        )
+        if VOICE_OUTPUT:
+            voice.speak(msg if success else "Couldn't search for that.")
     else:
         # Chat — capture full reply, then speak it
         reply = chat_capture(user_text)
@@ -1146,6 +1204,19 @@ def handle_window(user_text):
             reply = handle_system_info(user_text)
             if _window_bridge and reply:
                 _window_bridge.assistant_said.emit(reply)
+        elif intent == "web_search":
+            raw_browser = parsed.get("browser")
+            if raw_browser in (None, "", "null", "none", "None", "Null"):
+                browser = None
+            else:
+                browser = raw_browser.lower()
+            success, msg = handle_web_search(
+                parsed.get("service"),
+                parsed.get("query", ""),
+                browser,
+            )
+            if _window_bridge:
+                _window_bridge.system_message.emit(msg)
         else:
             reply = chat_capture_silent(user_text)
             if _window_bridge and reply:

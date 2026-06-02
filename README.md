@@ -12,6 +12,7 @@ Loki is a desktop AI assistant that runs entirely on your own machine. No cloud 
 - Live quietly in your system tray, available whenever you press the hotkey
 - Read PDFs and answer questions about them, with local semantic search (RAG)
 - Convert text and equations to LaTeX
+- Search the web — Google Maps, YouTube, Wikipedia, Google, Amazon, GitHub, and more — by voice or text
 - A chat window with rendered markdown, code blocks with copy buttons, and drag-and-drop PDF support
 
 Built for Windows. The LLM, speech recognition, and text-to-speech all run locally.
@@ -212,6 +213,24 @@ These work in any mode and don't go through the LLM:
 Reminders persist in `assistant.db` (a SQLite file in the project folder). They survive restarts. If Loki was off when a reminder was due, it fires when you next launch.
 
 Reminders show a custom-styled popup in the bottom-right of your primary monitor and stays on top until you dismiss it. A sound plays alongside.
+
+### Web search
+
+Loki opens search results for various services in your browser. No external API calls — it just constructs the right URL and lets your browser handle the search.
+
+- "open the map of Madison, Wisconsin" → Google Maps
+- "show me hotels near times square on maps" → Google Maps
+- "search youtube for jazz playlists" → YouTube
+- "look up superconductivity on wikipedia" → Wikipedia
+- "google the latest qwen3 benchmarks" → Google
+- "find images of aurora borealis" → Google Images
+- "search github for python pdf libraries" → GitHub
+- "find pandas dataframe groupby on stackoverflow" → Stack Overflow
+- "search amazon for usb-c hubs" → Amazon
+
+You can also specify a browser: "open the map of Chicago in Firefox" routes the search through Firefox specifically. Without a browser named, your system default is used.
+
+Supported services: google, maps, youtube, wikipedia, amazon, github, stackoverflow, images.
 
 ### Working with PDFs
 
