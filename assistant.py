@@ -1,61 +1,109 @@
-import json
-import os
-import subprocess
-from pathlib import Path
-import requests
-import time
-import dateparser
-from datetime import datetime
-import db
-import reminders
-import keyboard
-import voice
-import sys
-import re
-import tempfile
-from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import QTimer
-import chat_window
+"""Loki — a local AI assistant for Windows.
+
+How a message flows:
+    front end (text REPL / voice / chat window)
+      -> utility commands (exit, reset, voice on/off, clear fired)
+      -> dispatch(): calculator -> calculus -> LLM router -> intent handler
+      -> a Reply that each front end displays its own way
+
+Run:
+    python assistant.py           text mode
+    python assistant.py --voice   push-to-talk in the terminal
+    python assistant.py --tray    tray icon + chat window (normal use)
+"""
 import atexit
-import tray as tray_module
+import ctypes
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import traceback
+import webbrowser
+import psutil
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from urllib.parse import quote_plus
+
+import dateparser
+import keyboard
+import requests
+from PySide6.QtWidgets import QApplication
+from simpleeval import simple_eval
+
+import chat_window
+import db
 import pdf_handler
 import pdf_rag
-import system_info
-from simpleeval import simple_eval
-import math
-import ctypes
-import webbrowser
-import threading
+import reminders
 import symbolic_math
-from urllib.parse import quote_plus
+import system_info
+import tray as tray_module
+import voice
 
 if sys.platform == "win32":
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Loki.LocalAssistant.1.0")
 
+
+# ============================================================================
+# Configuration
+# ============================================================================
+BASE_DIR = Path(__file__).parent
+APPS_FILE = BASE_DIR / "apps.json"
+MANUAL_APPS_FILE = BASE_DIR / "manual_apps.json"
+LATEX_PREFS_FILE = BASE_DIR / "latex_preferences.md"
 LOCKFILE = os.path.join(tempfile.gettempdir(), "loki_assistant.lock")
 
+ROUTER_MODEL = "qwen3:8b"
+CHAT_MODEL = "qwen3:8b"
+OLLAMA_URL = "http://localhost:11434/api/chat"
+
+VOICE_HOTKEY = "f9"     # press and hold to talk
+VOICE_OUTPUT = False    # speak replies out loud
+
+MAX_HISTORY_TURNS = 10  # chat turns the model remembers
+
+LOKI_IDENTITY = """You are Loki, a local AI assistant running privately on the user's PC.
+Your features include: chat and Q&A, searching the web (Google, Maps, YouTube, Wikipedia,
+etc.), opening apps and websites, setting one-off and recurring reminders, reading PDFs and
+answering questions about them, converting text to LaTeX, exact symbolic calculus (integrate,
+differentiate), quick arithmetic, and system info queries (CPU, RAM, disk, battery, uptime).
+When users ask what you can do, describe these specific capabilities."""
+
+# Set in tray_mode() so code running in background threads can post to the window
+_window_bridge = None
+
+# In tray mode, all output goes to a daily log file
+if "--tray" in sys.argv:
+    log_dir = BASE_DIR / "logs"
+    log_dir.mkdir(exist_ok=True)
+    log_path = log_dir / f"log_{datetime.now().strftime('%m%d%Y')}.txt"
+    sys.stdout = open(log_path, "a", buffering=1, encoding="utf-8")
+    sys.stderr = sys.stdout
+    print(f"\n--- Assistant started at {datetime.now()} ---")
+
+
+# ============================================================================
+# Single-instance lock (tray mode)
+# ============================================================================
 def _pid_is_running(pid):
-    """Cross-platform check: is this PID a live process?"""
-    if pid <= 0:
-        return False
+    """True if pid is a live Python process, i.e. probably another Loki.
+
+    Checking the name matters: Windows reuses PIDs, so after Loki exits
+    uncleanly its old PID can belong to an unrelated program."""
     try:
-        if os.name == "nt":
-            # Windows: use OpenProcess to check
-            PROCESS_QUERY_INFORMATION = 0x0400
-            handle = ctypes.windll.kernel32.OpenProcess(
-                PROCESS_QUERY_INFORMATION, False, pid
-            )
-            if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
-            return False
-        else:
-            # Unix: signal 0 trick
-            os.kill(pid, 0)
-            return True
-    except (OSError, ValueError):
+        name = psutil.Process(pid).name().lower()
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
         return False
-    
+    return "python" in name
+
+
 def release_lock():
     try:
         if os.path.exists(LOCKFILE):
@@ -65,6 +113,7 @@ def release_lock():
     except Exception:
         pass
 
+
 def acquire_lock():
     if os.path.exists(LOCKFILE):
         try:
@@ -72,47 +121,18 @@ def acquire_lock():
                 pid = int(f.read().strip())
         except (OSError, ValueError):
             pid = -1
-
         if _pid_is_running(pid):
             print(f"Already running (PID {pid}). Exiting.")
             sys.exit(0)
-        # else: stale lock, fall through and overwrite it
-
+        # otherwise it's a stale lock — overwrite it
     with open(LOCKFILE, "w") as f:
         f.write(str(os.getpid()))
     atexit.register(release_lock)
 
 
-APPS_FILE = Path(__file__).parent / "apps.json"
-MANUAL_APPS_FILE = Path(__file__).parent / "manual_apps.json"
-
-ROUTER_MODEL = "qwen3:8b"
-CHAT_MODEL = "qwen3:8b"
-OLLAMA_URL = "http://localhost:11434/api/chat"
-
-VOICE_HOTKEY = "f9"  # press and hold to talk
-VOICE_OUTPUT = False  # set to False if you want text-only replies
-
-LOKI_IDENTITY = """You are Loki, a local AI assistant running privately on the user's PC.
-Your features include: chat and Q&A, **searching the web (Google,
-Maps, YouTube, Wikipedia, etc.)**, opening apps and websites, setting one-off and recurring
-reminders, reading PDFs and answering questions about them, converting text to LaTeX, exact
-symbolic calculus (integrate, differentiate), quick arithmetic, and system info queries
-(CPU, RAM, disk, battery, uptime). When users ask what you can do, describe these specific
-capabilities."""
-
-if "--tray" in sys.argv:
-    log_dir = Path(__file__).parent / "logs"
-    log_dir.mkdir(exist_ok=True)
-    log_path = log_dir / f"log_{datetime.now().strftime('%m%d%Y')}.txt"
-    sys.stdout = open(log_path, "a", buffering=1, encoding="utf-8")
-    sys.stderr = sys.stdout
-    print(f"\n--- Assistant started at {datetime.now()} ---")
-
-
-# ----------------------------
-# Apps
-# ----------------------------
+# ============================================================================
+# Apps and websites
+# ============================================================================
 def load_apps():
     apps = {}
     if APPS_FILE.exists():
@@ -123,13 +143,85 @@ def load_apps():
             apps.update(json.load(f))
     return apps
 
+
 APPS = load_apps()
 APP_NAMES = sorted(APPS.keys())
 
 
-# ----------------------------
-# Router: small model classifies intent
-# ----------------------------
+def _launch_exe(path, args=None):
+    subprocess.Popen(
+        [path, *(args or [])],
+        cwd=os.path.dirname(path),
+        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+    )
+
+
+def _launch_store(appid):
+    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{appid}"])
+
+
+def _launch_elevated(path, args=None):
+    arg_str = f' -ArgumentList "{" ".join(args)}"' if args else ""
+    subprocess.Popen(
+        ["powershell", "-Command", f'Start-Process -FilePath "{path}" -Verb RunAs{arg_str}']
+    )
+
+
+def open_app(name, url_arg=None):
+    """Launch an app from apps.json. Returns (ok, message)."""
+    info = APPS.get(name)
+    if not info:
+        return False, f"I don't know an app called '{name}'."
+    try:
+        args = list(info.get("args", []))
+        if url_arg:
+            args.append(url_arg)
+        note = ""
+        if info["type"] == "exe":
+            if info.get("elevated"):
+                _launch_elevated(info["path"], args)
+            else:
+                _launch_exe(info["path"], args)
+        else:
+            _launch_store(info["appid"])
+            if url_arg:
+                note = f" ({name} is a Store app, so the link wasn't passed.)"
+        return True, f"Opening {name}.{note}"
+    except Exception as e:
+        return False, f"Failed to open {name}: {e}"
+
+
+def open_url(browser, url):
+    """Open a URL in a named browser, or the system default. Returns (ok, message)."""
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    if browser:
+        ok, msg = open_app(browser, url_arg=url)
+        return ok, (f"Opening {url} in {browser}." if ok else msg)
+    webbrowser.open(url)
+    return True, f"Opening {url} in default browser."
+
+
+def close_app(name):
+    """Close an app by killing its exe. Returns (ok, message)."""
+    info = APPS.get(name)
+    if not info or info["type"] != "exe":
+        return False, f"Can't auto-close '{name}'."
+    exe = os.path.basename(info["path"])
+    subprocess.run(["taskkill", "/F", "/IM", exe], capture_output=True)
+    return True, f"Closed {name}."
+
+
+def _clean_browser(raw):
+    """The router sometimes sends "null"/"none" as a string — treat as no browser."""
+    if not raw or str(raw).strip().lower() in ("null", "none"):
+        return None
+    return str(raw).strip().lower()
+
+
+# ============================================================================
+# Router: the LLM classifies each message into an intent
+# ============================================================================
 ROUTER_SYSTEM_PROMPT = """ You are an intent classifier for a desktop assistant. \
 Given a user message, respond with a SINGLE JSON object and nothing else.
 
@@ -214,7 +306,6 @@ Rules:
 - Use web_search ONLY when the user explicitly wants to search, browse, or open a page, otherwise default to chat. Trigger phrases examples: "search for", "look up X on <service>", "open the map of", "find X on", "google X", "show me X on youtube".
 """
 
-
 VALID_INTENTS = {
     "open_app", "open_url", "close_app",
     "add_reminder", "add_recurring", "list_reminders", "cancel_reminder",
@@ -224,6 +315,7 @@ VALID_INTENTS = {
     "web_search",
     "chat",
 }
+
 
 def classify_intent(user_text):
     system = ROUTER_SYSTEM_PROMPT.replace(
@@ -258,186 +350,147 @@ def classify_intent(user_text):
         print(f"(router failed: {e}, falling back to chat)")
         return {"intent": "chat"}
 
-# ----------------------------
-# Actions
-# ----------------------------
-def launch_exe(path, args=None):
-    args = args or []
-    subprocess.Popen(
-        [path, *args],
-        cwd=os.path.dirname(path),
-        creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
-    )
 
-def launch_store(appid):
-    subprocess.Popen(["explorer.exe", f"shell:AppsFolder\\{appid}"])
-
-def launch_elevated(path, args=None):
-    args = args or []
-    arg_str = f' -ArgumentList "{" ".join(args)}"' if args else ""
-    subprocess.Popen(
-        ["powershell", "-Command",
-         f'Start-Process -FilePath "{path}" -Verb RunAs{arg_str}']
-    )
-
-def open_app(name, url_arg=None):
-    info = APPS.get(name)
-    if not info:
-        print(f"Don't know '{name}'. Got: {APP_NAMES[:5]}{'...' if len(APP_NAMES) > 5 else ''}")
-        return False
-    try:
-        args = list(info.get("args", []))
-        if url_arg:
-            args.append(url_arg)
-
-        if info["type"] == "exe":
-            if info.get("elevated"):
-                launch_elevated(info["path"], args)
-            else:
-                launch_exe(info["path"], args)
-        else:
-            launch_store(info["appid"])
-            if url_arg:
-                print(f"(Note: {name} is a Store app; URL not passed.)")
-
-        print(f"Opening {name}{f' ({url_arg})' if url_arg else ''}...")
-        return True
-    except Exception as e:
-        print(f"Failed to open {name}: {e}")
-        return False
-
-def open_url(browser, url):
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    if browser and browser not in ("null", "none"):
-        return open_app(browser, url_arg=url)
-    # No browser specified: use OS default
-    webbrowser.open(url)
-    print(f"Opening {url}")
-    return True
-
-def close_app(name):
-    info = APPS.get(name)
-    if not info or info["type"] != "exe":
-        print(f"Can't auto-close '{name}'.")
-        return False
-    exe = os.path.basename(info["path"])
-    subprocess.run(["taskkill", "/F", "/IM", exe], capture_output=True)
-    print(f"Closed {name}")
-    return True
-
-
-# ----------------------------
-# Chat fallback (big model, streaming)
-# Conversation history (in-memory, this session only)
-# ----------------------------
+# ============================================================================
+# Chat (with PDF context when a PDF is attached)
+# ============================================================================
 chat_history = []
-MAX_HISTORY_TURNS = 10
 
-DEPTH_TRIGGERS = (
-    "in depth", "in detail", "more detail", "elaborate",
-    "explain more", "tell me more", "go deeper",
-    "more in depth", "a bit more", "expand on",
+SUMMARY_TRIGGERS = (
+    "summarize", "summary", "overview", "what is this paper about",
+    "what's this paper about", "tl;dr", "main points", "key findings", "conclusion",
 )
 
 
-def chat(message):
-    messages = _build_chat_messages(message)
+def _remember(role, content):
+    chat_history.append({"role": role, "content": content})
+    if len(chat_history) > MAX_HISTORY_TURNS * 2:
+        del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
 
-    r = requests.post(
-        OLLAMA_URL,
-        json={"model": CHAT_MODEL, "messages": messages, "stream": True, "think": False},
-        stream=True,
+
+def _build_chat_messages(message):
+    """Messages to send for one chat turn. Records the user message in history.
+
+    With a PDF attached, the model gets the document excerpts (or the whole
+    document for summary requests) instead of the chat history."""
+    _remember("user", message)
+
+    if not pdf_handler.is_attached():
+        return [{"role": "system", "content": LOKI_IDENTITY}, *chat_history]
+
+    info = pdf_handler.get_info()
+    if any(t in message.lower() for t in SUMMARY_TRIGGERS):
+        context = pdf_handler.get_context()
+    else:
+        context = "\n\n---\n\n".join(pdf_rag.retrieve(message))
+
+    context_message = (
+        f"You are answering a question about the document '{info['filename']}'. "
+        f"Below are the most relevant excerpts. Answer using ONLY these excerpts. "
+        f"Quote exact numbers and values precisely as written. If the excerpts don't "
+        f"contain the answer, say the document doesn't appear to specify it.\n\n"
+        f"--- RELEVANT EXCERPTS ---\n{context}\n--- END EXCERPTS ---"
     )
-    full_reply = ""
-    for line in r.iter_lines():
-        if not line:
-            continue
-        chunk = json.loads(line)
-        piece = chunk.get("message", {}).get("content", "")
-        print(piece, end="", flush=True)
-        full_reply += piece
-        if chunk.get("done"):
-            print()
-            break
-    chat_history.append({"role": "assistant", "content": full_reply})
-    return full_reply
+    return [
+        {"role": "system", "content": context_message},
+        {"role": "user", "content": message},
+    ]
 
 
-def parse_when(when_str):
-    if not when_str:
-        return None
-    when_str = _normalize_time_string(when_str)
-    return dateparser.parse(
-        when_str,
-        settings={
-            "PREFER_DATES_FROM": "future",
-            "RELATIVE_BASE": datetime.now(),
-        },
-    )
+def _strip_leading_junk(reply):
+    """qwen3 occasionally starts a reply with stray tokens like ','\"+ — drop them."""
+    return re.sub(r'^[\s\'",+\-•·\u0080-￿]{1,10}(?=[A-Z])', '', reply).strip()
 
 
+def chat(message, stream=False):
+    """Ask the chat model. With stream=True the reply is printed to the
+    terminal as it arrives (text and voice modes). Returns the full reply."""
+    payload = {
+        "model": CHAT_MODEL,
+        "messages": _build_chat_messages(message),
+        "stream": stream,
+        "think": False,
+    }
+    if stream:
+        reply = ""
+        with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120) as r:
+            for line in r.iter_lines():
+                if not line:
+                    continue
+                chunk = json.loads(line)
+                piece = chunk.get("message", {}).get("content", "")
+                print(piece, end="", flush=True)
+                reply += piece
+                if chunk.get("done"):
+                    print()
+                    break
+    else:
+        r = requests.post(OLLAMA_URL, json=payload, timeout=120)
+        reply = r.json()["message"]["content"]
+
+    reply = _strip_leading_junk(reply)
+    _remember("assistant", reply)
+    return reply
+
+
+# ============================================================================
+# Reminders
+# ============================================================================
 def _normalize_time_string(s):
-    """Fix common Whisper transcription artifacts in spoken times.
-    Converts patterns like '9 27 pm', '9.27 pm', '9,27 pm', '9-27 pm' to '9:27 pm'."""
-    # Match: 1-2 digits, any non-alphanumeric separator(s), exactly 2 digits, then am/pm
-    s = re.sub(
+    """Fix Whisper's spoken-time artifacts: '9 27 pm', '9.27 pm', '9,27 pm' → '9:27 pm'."""
+    return re.sub(
         r'\b(\d{1,2})[^\w]+(\d{2})\s*(a\.?m\.?|p\.?m\.?)\b',
         r'\1:\2 \3',
         s,
         flags=re.IGNORECASE,
     )
-    return s
 
 
-def handle_add_reminder(text, when_str):
+def parse_when(when_str):
+    if not when_str:
+        return None
+    return dateparser.parse(
+        _normalize_time_string(when_str),
+        settings={"PREFER_DATES_FROM": "future", "RELATIVE_BASE": datetime.now()},
+    )
+
+
+def add_reminder(text, when_str):
+    """Returns (ok, message)."""
     fire_at = parse_when(when_str)
     if not fire_at:
-        msg = f"Couldn't understand the time '{when_str}'. Try 'in 5 minutes', 'tomorrow at 8pm', etc."
-        print(msg)
-        return False, msg
+        return False, (f"Couldn't understand the time '{when_str}'. "
+                       f"Try 'in 5 minutes', 'tomorrow at 8pm', etc.")
     if fire_at <= datetime.now():
-        msg = f"That time ({fire_at.strftime('%a %b %d at %I:%M %p')}) is already past."
-        print(msg)
-        return False, msg
+        return False, f"That time ({fire_at.strftime('%a %b %d at %I:%M %p')}) is already past."
     text = text.strip()
     if text.lower().startswith("to "):
         text = text[3:]
-    if not text:
-        text = "(unspecified)"
+    text = text or "(unspecified)"
     rid = reminders.add_and_schedule(text, fire_at, kind="once")
-    msg = f"✓ Reminder #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}"
-    print(msg)
-    return True, msg
+    return True, f"✓ Reminder #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}"
 
 
-def handle_add_recurring(text, when_str, kind):
+def add_recurring(text, when_str, kind):
+    """Returns (ok, message)."""
     if kind not in ("yearly", "monthly", "weekly", "daily"):
-        msg = f"Unknown recurrence kind '{kind}'."
-        print(msg)
-        return False, msg
+        return False, f"Unknown recurrence kind '{kind}'."
     fire_at = parse_when(when_str)
     if not fire_at:
-        msg = f"Couldn't understand '{when_str}'."
-        print(msg)
-        return False, msg
+        return False, f"Couldn't understand '{when_str}'."
     if fire_at <= datetime.now() and kind == "yearly":
         fire_at = fire_at.replace(year=datetime.now().year + 1)
-    text = text.strip()
-    if not text:
-        text = "(unspecified)"
+    text = text.strip() or "(unspecified)"
     rid = reminders.add_and_schedule(text, fire_at, kind=kind)
-    msg = f"✓ Recurring ({kind}) #{rid} set for {fire_at.strftime('%A %b %d at %I:%M %p')}: {text}"
-    print(msg)
-    return True, msg
+    return True, (f"✓ Recurring ({kind}) #{rid} set for "
+                  f"{fire_at.strftime('%A %b %d at %I:%M %p')}: {text}")
 
 
-def handle_list_reminders():
+def format_reminders():
     rows = db.list_pending()
     if not rows:
-        print("No upcoming reminders.")
-        return
-    print(f"Reminders ({len(rows)}):")
+        return "No upcoming reminders."
+    lines = [f"Reminders ({len(rows)}):"]
     now = datetime.now()
     for r in rows:
         when = datetime.fromisoformat(r["fire_at"])
@@ -448,16 +501,17 @@ def handle_list_reminders():
             status = "⚠ overdue"
         else:
             status = "  pending"
-        print(f"  #{r['id']}{kind_tag}  {status}  {when.strftime('%a %b %d %I:%M %p')}  — {r['text']}")
+        lines.append(f"  #{r['id']}{kind_tag} {status}  "
+                     f"{when.strftime('%a %b %d %I:%M %p')}  — {r['text']}")
+    return "\n".join(lines)
 
 
-def handle_cancel_reminder(ids):
+def cancel_reminders(ids):
+    """Cancel reminders by id (or "all"). Returns a message."""
     if ids == "all":
-        all_pending = db.list_pending(include_recent=False)
-        ids = [r["id"] for r in all_pending]
+        ids = [r["id"] for r in db.list_pending(include_recent=False)]
     if not ids:
-        print("No reminders to cancel.")
-        return
+        return "No reminders to cancel."
     cancelled = []
     for rid in ids:
         if db.cancel(int(rid)):
@@ -465,189 +519,55 @@ def handle_cancel_reminder(ids):
             if reminders.scheduler.get_job(job_id):
                 reminders.scheduler.remove_job(job_id)
             cancelled.append(rid)
-    if cancelled:
-        print(f"✓ Cancelled reminder{'s' if len(cancelled) > 1 else ''}: {', '.join(f'#{i}' for i in cancelled)}")
-    else:
-        print("No matching reminders found.")
+    if not cancelled:
+        return "No matching reminders found."
+    plural = "s" if len(cancelled) > 1 else ""
+    return f"✓ Cancelled reminder{plural}: {', '.join(f'#{i}' for i in cancelled)}"
 
 
-def voice_input_loop():
-    """Push-to-talk: hold F9 to record, release to transcribe and run."""
-    recorder = voice.Recorder()
-    print(f"\nVoice mode: hold {VOICE_HOTKEY.upper()} to talk. Release to send.")
-    print(f"Type or press hotkey. 'voice off' to disable speech output.\n")
-
-    is_recording = False
-
-    while True:
-        try:
-            # Check for hotkey press (non-blocking)
-            if keyboard.is_pressed(VOICE_HOTKEY):
-                if not is_recording:
-                    print("🎙  recording...", end="", flush=True)
-                    recorder.start()
-                    is_recording = True
-                time.sleep(0.05)
-                continue
-
-            if is_recording:
-                # Hotkey released
-                audio = recorder.stop()
-                is_recording = False
-                print(" transcribing...", end="", flush=True)
-                text = voice.transcribe(audio)
-                print(f"\r🎙  you said: {text}" + " " * 20)
-                if text:
-                    handle_voice(text)
-                continue
-
-            time.sleep(0.05)
-        except KeyboardInterrupt:
-            break
-
-def is_utility_command(text):
-    """Check if text is a hardcoded utility command. Returns the canonical
-    command name or None."""
-    # Normalize: lowercase, strip trailing punctuation and whitespace
-    normalized = re.sub(r"[.,!?;:\s]+$", "", text.lower().strip())
-
-    UTILITY_COMMANDS = {
-        "exit":         {"exit", "quit", "bye", "goodbye", "stop", "shut down",
-                         "shutdown", "end", "close assistant"},
-        "voice_off":    {"voice off", "stop talking", "be quiet", "shush",
-                         "mute", "silence"},
-        "voice_on":     {"voice on", "speak again", "unmute", "talk to me"},
-        "reset":        {"reset", "clear", "new chat", "clear chat",
-                         "forget everything", "start over"},
-    }
-
-    for canonical, variants in UTILITY_COMMANDS.items():
-        if normalized in variants:
-            return canonical
-    return None
-
-def tray_mode():
-    acquire_lock()
-    global _window_bridge  # NEW
-
-    reminders.start()
-
-    qt_app = QApplication.instance() or QApplication([])
-    qt_app.setQuitOnLastWindowClosed(False)
-
-    bridge = chat_window.ChatBridge()
-    _window_bridge = bridge  # NEW — handlers can now post to the window
-    window = chat_window.ChatWindow(bridge)
-
-    # We emit a signal so the popup is created on the GUI thread.
-    def display_reminder(title, body):
-        bridge.reminder_fired.emit(title, body)
-    reminders.set_display_callback(display_reminder)
-
-    def _show_window():
-        window.show()
-        window.raise_()
-        window.activateWindow()
-
-    def _do_quit():
-        qt_app.quit()
-
-    bridge.show_window_requested.connect(_show_window)
-    bridge.quit_requested.connect(_do_quit)
-
-    _active_popups = []  # keep references so they don't get garbage collected
-
-    def _show_reminder_popup(title, body):
-        try:
-            popup = chat_window.ReminderPopup(title, body)
-            _active_popups.append(popup)
-            popup.destroyed.connect(
-                lambda: _active_popups.remove(popup) if popup in _active_popups else None
-            )
-            popup.show()
-            popup.raise_()
-            popup.activateWindow()
-        except Exception as e:
-            import traceback
-            print(f"[POPUP] FAILED: {e}", flush=True)
-            traceback.print_exc()
-
-    bridge.reminder_fired.connect(_show_reminder_popup)
-
-    def _on_submit(text):
-        bridge.user_said.emit(text)  # show user message in window immediately
-        # Run the handler in a worker thread so the GUI stays responsive
-        # while the LLM is generating.
-        threading.Thread(target=handle_window, args=(text,), daemon=True).start()
-
-    window.submit_requested.connect(_on_submit)
-
-    running = {"alive": True}
-
-    def quit_cb():
-        running["alive"] = False
-        bridge.quit_requested.emit()
-
-    def voice_toggle_cb():
-        global VOICE_OUTPUT
-        VOICE_OUTPUT = not VOICE_OUTPUT
-
-    def voice_status_cb():
-        return VOICE_OUTPUT
-
-    def open_chat_cb():
-        bridge.show_window_requested.emit()
-
-    app = tray_module.TrayApp(
-        on_quit=quit_cb,
-        on_voice_toggle=voice_toggle_cb,
-        get_voice_status=voice_status_cb,
-        on_open_chat=open_chat_cb,
-    )
-    app.run_in_thread()
-
-    voice_thread = threading.Thread(
-        target=_voice_loop_for_tray,
-        args=(running,),
-        daemon=True,
-    )
-    voice_thread.start()
-
-    qt_app.exec()
-    running["alive"] = False
-    voice_thread.join(timeout=1.0)
+def clear_fired_reminders():
+    cleared = 0
+    for r in db.list_pending():
+        if r["fired_at"] and r["kind"] == "once":
+            db.cancel(r["id"])
+            cleared += 1
+    return f"Cleared {cleared} fired reminder(s)."
 
 
-def _voice_loop_for_tray(running):
-    recorder = voice.Recorder()
-    is_recording = False
-    while running["alive"]:
-        try:
-            if keyboard.is_pressed(VOICE_HOTKEY):
-                if not is_recording:
-                    if _window_bridge:
-                        _window_bridge.system_message.emit("🎙 Listening...")
-                    recorder.start()
-                    is_recording = True
-                time.sleep(0.05)
-                continue
-            if is_recording:
-                audio = recorder.stop()
-                is_recording = False
-                text = voice.transcribe(audio)
-                if text:
-                    # Show what was heard in the window
-                    if _window_bridge:
-                        _window_bridge.user_said.emit(text)
-                    # Route through window handler — same path as typed input
-                    handle_window(text)
-                continue
-            time.sleep(0.05)
-        except Exception as e:
-            print(f"Voice loop error: {e}", flush=True)
-            is_recording = False
+# ============================================================================
+# PDFs
+# ============================================================================
+def attach_pdf(path):
+    """Load a PDF for Q&A. Returns a message."""
+    if not path or not path.lower().endswith(".pdf"):
+        return ("To attach a PDF, give me the full file path ending in .pdf. "
+                "Or drag a PDF onto the window.")
+    try:
+        info = pdf_handler.attach(path)
+    except FileNotFoundError:
+        return f"File not found: {path}"
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        return f"Failed to read PDF: {e}"
+
+    filename = Path(info["path"]).name
+    msg = (f"Loaded {filename} ({info['pages']} pages, ~{info['estimated_tokens']:,} tokens). "
+           f"Ask me anything about it. Say 'detach' to unload.")
+    if info.get("truncated"):
+        msg += " (Document was long and got truncated — later pages may be incomplete.)"
+    return msg
 
 
+def detach_pdf():
+    if pdf_handler.detach():
+        return "PDF unloaded. Back to general chat."
+    return "No PDF was attached."
+
+
+# ============================================================================
+# Text → LaTeX
+# ============================================================================
 LATEX_SYSTEM_PROMPT = """You are a LaTeX conversion tool. Convert the user's input into correct LaTeX.
 
 Rules:
@@ -658,36 +578,27 @@ Rules:
 - Use proper LaTeX commands: \\frac{}{}, \\int, \\sum, \\sqrt{}, Greek letters as \\alpha etc., \\partial, \\nabla, subscripts with _ and superscripts with ^.
 - If the input is already LaTeX, clean it up and fix any errors rather than double-wrapping it."""
 
-LATEX_PREFS_FILE = Path(__file__).parent / "latex_preferences.md"
-
-
-def _load_latex_prefs():
-    if LATEX_PREFS_FILE.exists():
-        return LATEX_PREFS_FILE.read_text(encoding="utf-8").strip()
-    return ""
-
 
 def convert_to_latex(text, mode="display"):
-    """Convert text/equations to LaTeX. Returns the LaTeX string."""
+    """Convert text/equations to LaTeX. Returns (latex, error)."""
+    if not text or not text.strip():
+        return None, "What should I convert? Paste the text or equation."
+
     system = LATEX_SYSTEM_PROMPT
-    prefs = _load_latex_prefs()
-    if prefs:
-        system += f"\n\nUser style preferences:\n{prefs}"
+    if LATEX_PREFS_FILE.exists():
+        prefs = LATEX_PREFS_FILE.read_text(encoding="utf-8").strip()
+        if prefs:
+            system += f"\n\nUser style preferences:\n{prefs}"
 
-    mode_instruction = (
-        "Use display mode: wrap in \\[ ... \\]."
-        if mode == "display"
-        else "Use inline mode: wrap in \\( ... \\)."
-    )
-    user_prompt = f"{mode_instruction}\n\nConvert this to LaTeX:\n{text}"
-
+    mode_instruction = ("Use display mode: wrap in \\[ ... \\]." if mode == "display"
+                        else "Use inline mode: wrap in \\( ... \\).")
     r = requests.post(
         OLLAMA_URL,
         json={
             "model": CHAT_MODEL,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": f"{mode_instruction}\n\nConvert this to LaTeX:\n{text}"},
             ],
             "stream": False,
             "think": False,
@@ -698,9 +609,12 @@ def convert_to_latex(text, mode="display"):
     latex = r.json()["message"]["content"].strip()
     latex = re.sub(r"^```[\w]*\n?", "", latex)
     latex = re.sub(r"\n?```$", "", latex)
-    return latex.strip()
+    return latex.strip(), None
 
 
+# ============================================================================
+# System info
+# ============================================================================
 SYSTEM_INFO_PROMPT = """You are answering a question about the user's computer. \
 Below is the current system data as JSON. Answer the user's specific question \
 concisely using this data. Only mention what they asked about — don't dump every stat \
@@ -710,7 +624,7 @@ System data:
 %SYSTEM_DATA%"""
 
 
-def handle_system_info(user_text):
+def answer_system_question(user_text):
     data = system_info.gather_all()
     system = SYSTEM_INFO_PROMPT.replace("%SYSTEM_DATA%", json.dumps(data, indent=2))
     r = requests.post(
@@ -730,7 +644,9 @@ def handle_system_info(user_text):
     return r.json()["message"]["content"].strip()
 
 
-# Allow common math functions/constants in expressions
+# ============================================================================
+# Calculator (pure arithmetic, no LLM)
+# ============================================================================
 _MATH_NAMES = {
     "pi": math.pi, "e": math.e, "tau": math.tau,
     "sqrt": math.sqrt, "sin": math.sin, "cos": math.cos, "tan": math.tan,
@@ -738,32 +654,27 @@ _MATH_NAMES = {
     "abs": abs, "round": round, "floor": math.floor, "ceil": math.ceil,
     "factorial": math.factorial,
 }
-
-# A pure-math expression: digits, operators, parens, decimal points,
-# and the allowed function/constant names — nothing else.
 _MATH_RE = re.compile(r'^[\d\s+\-*/().,%^]+$')
 
 
 def try_calculator(text):
-    """If text is a pure arithmetic expression, evaluate it. Returns
-    the result string, or None if it's not pure math."""
+    """If text is a pure arithmetic expression, return its value as a string;
+    otherwise None."""
     expr = text.strip().rstrip("=?").strip()
-    # Quick reject: must contain a digit and an operator
     if not re.search(r'\d', expr) or not re.search(r'[+\-*/^%]', expr):
         return None
-    # Allow function-style expressions too (sqrt(2), sin(0.5), etc.)
-    test = re.sub(r'[a-z_]+', '', expr.lower())  # strip names to check the rest
-    if not _MATH_RE.match(test if test.strip() else "0"):
+    leftover = re.sub(r'[a-z_]+', '', expr.lower())   # allow sqrt(), pi, etc.
+    if not _MATH_RE.match(leftover if leftover.strip() else "0"):
         return None
     try:
-        # simpleeval uses ** for power; convert ^ to **
-        expr_py = expr.replace("^", "**")
-        result = simple_eval(expr_py, names=_MATH_NAMES, functions=_MATH_NAMES)
-        return str(result)
+        return str(simple_eval(expr.replace("^", "**"), names=_MATH_NAMES, functions=_MATH_NAMES))
     except Exception:
         return None
-    
 
+
+# ============================================================================
+# Web search (builds a search URL — no API, nothing leaves your browser)
+# ============================================================================
 SEARCH_SERVICES = {
     "google":        "https://www.google.com/search?q={q}",
     "maps":          "https://www.google.com/maps/search/{q}",
@@ -776,492 +687,199 @@ SEARCH_SERVICES = {
 }
 
 
-def handle_web_search(service, query, browser):
+def web_search(service, query, browser):
+    """Returns (ok, message)."""
     if not query or not query.strip():
         return False, "What should I search for?"
     service = (service or "google").lower()
     if service not in SEARCH_SERVICES:
-        return False, f"Don't know the service '{service}'. Try google, maps, youtube, wikipedia, amazon, github, stackoverflow, or images."
-
+        return False, (f"Don't know the service '{service}'. Try "
+                       f"{', '.join(SEARCH_SERVICES)}.")
     url = SEARCH_SERVICES[service].format(q=quote_plus(query.strip()))
-    open_url(browser, url)
-    return True, f"Searching {service} for '{query}'."
-    
+    ok, msg = open_url(browser, url)
+    return ok, (f"Searching {service} for '{query}'." if ok else msg)
 
-# ----------------------------
-# Dispatcher
-# ----------------------------
-def handle(user_text):
-    lower = user_text.lower().strip()
-    if lower in ("reset", "clear", "new chat"):
-        chat_history.clear()
-        print("(chat history cleared)")
-        return
-    if lower in ("clear fired", "clear history", "clean up"):
-        rows = db.list_pending()
-        cleared = 0
-        for r in rows:
-            if r["fired_at"] and r["kind"] == "once":
-                db.cancel(r["id"])
-                cleared += 1
-        print(f"Cleared {cleared} fired reminder(s).")
-        return
-    # Pure-math shortcut — evaluate locally, skip the LLM entirely
-    calc = try_calculator(user_text)
-    if calc is not None:
-        print(f"= {calc}")
-        return
-    
+
+# ============================================================================
+# Dispatcher — shared by the text, voice and window front ends
+# ============================================================================
+@dataclass
+class Reply:
+    text: str
+    kind: str = "system"            # "system" = short status line, "assistant" = rendered reply
+    speak: Optional[str] = None     # what voice mode says (default: the text itself)
+    intent: Optional[str] = None
+    streamed: bool = False          # already printed to the terminal while streaming
+
+    @property
+    def spoken(self):
+        return self.speak if self.speak is not None else self.text
+
+
+def _on_open_app(p, _text):
+    app = (p.get("app") or "").lower()
+    ok, msg = open_app(app)
+    return Reply(msg)
+
+
+def _on_open_url(p, _text):
+    ok, msg = open_url(_clean_browser(p.get("browser")), p.get("url", ""))
+    return Reply(msg, speak="Opening it now." if ok else msg)
+
+
+def _on_close_app(p, _text):
+    ok, msg = close_app((p.get("app") or "").lower())
+    return Reply(msg)
+
+
+def _on_add_reminder(p, _text):
+    ok, msg = add_reminder(p.get("text", ""), p.get("when", ""))
+    return Reply(msg, speak="Reminder set." if ok else "I couldn't set that reminder.")
+
+
+def _on_add_recurring(p, _text):
+    ok, msg = add_recurring(p.get("text", ""), p.get("when", ""), p.get("kind", "yearly"))
+    return Reply(msg, speak="Recurring reminder set." if ok else "I couldn't set that reminder.")
+
+
+def _on_list_reminders(_p, _text):
+    return Reply(format_reminders(), speak="Here are your reminders.")
+
+
+def _on_cancel_reminder(p, _text):
+    return Reply(cancel_reminders(p.get("ids", [])))
+
+
+def _on_attach_pdf(p, _text):
+    return Reply(attach_pdf(p.get("path", "")))
+
+
+def _on_detach_pdf(_p, _text):
+    return Reply(detach_pdf())
+
+
+def _on_to_latex(p, _text):
+    latex, error = convert_to_latex(p.get("text", ""), p.get("mode", "display"))
+    if error:
+        return Reply(error)
+    return Reply(f"```latex\n{latex}\n```", kind="assistant", speak="Converted to LaTeX.")
+
+
+def _on_system_info(_p, text):
+    return Reply(answer_system_question(text), kind="assistant")
+
+
+def _on_web_search(p, _text):
+    ok, msg = web_search(p.get("service"), p.get("query", ""), _clean_browser(p.get("browser")))
+    return Reply(msg, speak=msg if ok else "Couldn't search for that.")
+
+
+INTENT_HANDLERS = {
+    "open_app":        _on_open_app,
+    "open_url":        _on_open_url,
+    "close_app":       _on_close_app,
+    "add_reminder":    _on_add_reminder,
+    "add_recurring":   _on_add_recurring,
+    "list_reminders":  _on_list_reminders,
+    "cancel_reminder": _on_cancel_reminder,
+    "attach_pdf":      _on_attach_pdf,
+    "detach_pdf":      _on_detach_pdf,
+    "to_latex":        _on_to_latex,
+    "system_info":     _on_system_info,
+    "web_search":      _on_web_search,
+    # "chat" has no entry: anything unhandled goes to chat()
+}
+
+
+def dispatch(user_text, stream=False):
+    """Do whatever the message asks and return a Reply.
+    stream=True prints chat replies to the terminal as they're generated."""
+    # 1. Pure arithmetic — instant, no LLM
+    value = try_calculator(user_text)
+    if value is not None:
+        return Reply(f"= {value}", speak=f"That's {value}")
+
+    # 2. Calculus commands ("integrate ...", "diff ...") — SymPy, no router
     calc_cmd = symbolic_math.parse_calculus_command(user_text)
     if calc_cmd is not None:
         body, error = symbolic_math.run(calc_cmd)
-        print(error if error else body)
-        return
-    
+        if error:
+            return Reply(error)
+        return Reply(body, kind="assistant", speak="Done. The result is on screen.")
+
+    # 3. Everything else goes through the router
     parsed = classify_intent(user_text)
     intent = parsed.get("intent", "chat")
-
-    if intent == "open_app":
-        open_app((parsed.get("app") or "").lower())
-    elif intent == "open_url":
-        raw_browser = parsed.get("browser")
-        if raw_browser in (None, "", "null", "none", "None", "Null"):
-            browser = None
-        else:
-            browser = raw_browser.lower()
-        url = parsed.get("url", "")
-        open_url(browser, url)
-    elif intent == "close_app":
-        close_app((parsed.get("app") or "").lower())
-    elif intent == "add_reminder":
-        handle_add_reminder(parsed.get("text", ""), parsed.get("when", ""))
-    elif intent == "add_recurring":
-        handle_add_recurring(
-            parsed.get("text", ""),
-            parsed.get("when", ""),
-            parsed.get("kind", "yearly"),
-        )
-    elif intent == "list_reminders":
-        handle_list_reminders()
-    elif intent == "cancel_reminder":
-        handle_cancel_reminder(parsed.get("ids", []))
-    elif intent == "attach_pdf":
-        path = parsed.get("path", "")
-        if not path or not path.lower().endswith(".pdf"):
-            print("To attach a PDF, give a full path ending in .pdf.")
-        else:
-            try:
-                info = pdf_handler.attach(path)
-                filename = Path(info["path"]).name
-                print(f"Loaded {filename} ({info['pages']} pages, "
-                    f"~{info['estimated_tokens']:,} tokens, {info['chunks']} chunks).")
-            except FileNotFoundError:
-                print(f"File not found: {path}")
-            except Exception as e:
-                print(f"Failed to read PDF: {e}")
-    elif intent == "detach_pdf":
-        was_attached = pdf_handler.detach()
-        print("PDF unloaded." if was_attached else "No PDF was attached.")
-    elif intent == "to_latex":
-        latex, error = handle_to_latex(
-            parsed.get("text", ""),
-            parsed.get("mode", "display"),
-        )
-        print(error if error else f"\n{latex}\n")
-    elif intent == "system_info":
-        print(handle_system_info(user_text))
-    elif intent == "web_search":
-        raw_browser = parsed.get("browser")
-        browser = None if raw_browser in (None, "", "null", "none", "None", "Null") else raw_browser.lower()
-        success, msg = handle_web_search(
-            parsed.get("service"),
-            parsed.get("query", ""),
-            browser,
-        )
-        print(msg)
+    handler = INTENT_HANDLERS.get(intent)
+    if handler:
+        reply = handler(parsed, user_text)
     else:
-        chat(user_text)
-
-
-def handle_voice(user_text):
-    cmd = is_utility_command(user_text)
-
-    if cmd == "exit":
-        raise KeyboardInterrupt
-    if cmd == "voice_off":
-        global VOICE_OUTPUT
-        VOICE_OUTPUT = False
-        print("(voice output disabled)")
-        return
-    if cmd == "voice_on":
-        VOICE_OUTPUT = True
-        print("(voice output enabled)")
-        return
-    if cmd == "reset":
-        chat_history.clear()
-        print("(chat history cleared)")
-        return
-    calc = try_calculator(user_text)
-    if calc is not None:
-        print(f"= {calc}")
-        if VOICE_OUTPUT:
-            voice.speak(f"That's {calc}")
-        return
-
-    parsed = classify_intent(user_text)
-    intent = parsed.get("intent", "chat")
-
-    # Non-chat intents — just speak a short confirmation
-    if intent == "open_app":
-        open_app((parsed.get("app") or "").lower())
-        if VOICE_OUTPUT: voice.speak(f"Opening {parsed.get('app', 'app')}.")
-    elif intent == "open_url":
-        raw_browser = parsed.get("browser")
-        if raw_browser in (None, "", "null", "none", "None", "Null"):
-            browser = None
-        else:
-            browser = raw_browser.lower()
-        url = parsed.get("url", "")
-        open_url(browser, url)
-        if VOICE_OUTPUT: voice.speak("Opening it now.")
-    elif intent == "close_app":
-        close_app((parsed.get("app") or "").lower())
-        if VOICE_OUTPUT: voice.speak(f"Closed {parsed.get('app', 'app')}.")
-    elif intent == "add_reminder":
-        handle_add_reminder(parsed.get("text", ""), parsed.get("when", ""))
-        if VOICE_OUTPUT: voice.speak("Reminder set.")
-    elif intent == "add_recurring":
-        handle_add_recurring(parsed.get("text", ""), parsed.get("when", ""), parsed.get("kind", "yearly"))
-        if VOICE_OUTPUT: voice.speak("Recurring reminder set.")
-    elif intent == "list_reminders":
-        handle_list_reminders()
-        # Don't speak the full list — would be tedious. Just acknowledge.
-        if VOICE_OUTPUT: voice.speak("Listed in the terminal.")
-    elif intent == "cancel_reminder":
-        handle_cancel_reminder(parsed.get("ids", []))
-        if VOICE_OUTPUT: voice.speak("Cancelled.")
-    elif intent == "system_info":
-        reply = handle_system_info(user_text)
-        print(reply)
-        if VOICE_OUTPUT:
-            voice.speak(reply)
-    elif intent == "web_search":
-        raw_browser = parsed.get("browser")
-        browser = None if raw_browser in (None, "", "null", "none", "None", "Null") else raw_browser.lower()
-        success, msg = handle_web_search(
-            parsed.get("service"),
-            parsed.get("query", ""),
-            browser,
-        )
-        if VOICE_OUTPUT:
-            voice.speak(msg if success else "Couldn't search for that.")
-    else:
-        # Chat — capture full reply, then speak it
-        reply = chat_capture(user_text)
-        if VOICE_OUTPUT and reply:
-            voice.speak(reply)
-
-
-def handle_attach_pdf(path):
-    # Guard: must be a real .pdf path
-    if not path or not path.lower().endswith(".pdf"):
-        if _window_bridge:
-            _window_bridge.system_message.emit(
-                "To attach a PDF, give me the full file path ending in .pdf. "
-                "Or drag a PDF onto the window."
-            )
-        return
-
-    # Try to load it
-    try:
-        info = pdf_handler.attach(path)
-    except FileNotFoundError:
-        if _window_bridge:
-            _window_bridge.system_message.emit(f"File not found: {path}")
-        return
-    except ValueError as e:
-        if _window_bridge:
-            _window_bridge.system_message.emit(str(e))
-        return
-    except Exception as e:
-        if _window_bridge:
-            _window_bridge.system_message.emit(f"Failed to read PDF: {e}")
-        return
-
-    # Build the confirmation message
-    filename = Path(info["path"]).name
-    msg = (
-        f"Loaded {filename} ({info['pages']} pages, ~{info['estimated_tokens']:,} tokens). "
-        f"Ask me anything about it. Say 'detach' to unload."
-    )
-    if info["truncated"]:
-        msg += (
-            " (Document was long and got truncated — questions about later "
-            "pages may be incomplete.)"
-        )
-
-    # Update status bar and post the message
-    if _window_bridge:
-        _window_bridge.pdf_attached.emit(filename)
-        _window_bridge.system_message.emit(msg)
-
-
-def handle_detach_pdf():
-    was_attached = pdf_handler.detach()
-    if _window_bridge:
-        if was_attached:
-            _window_bridge.pdf_attached.emit("")
-            _window_bridge.system_message.emit("PDF unloaded. Back to general chat.")
-        else:
-            _window_bridge.system_message.emit("No PDF was attached.")
-
-
-def handle_to_latex(text, mode):
-    if not text or not text.strip():
-        return None, "What should I convert? Paste the text or equation."
-    latex = convert_to_latex(text, mode)
-    return latex, None
-
-
-def _build_chat_messages(message):
-    """Build the message list for a chat call, injecting PDF context if attached.
-    Appends the user message to chat_history as a side effect."""
-    if pdf_handler.is_attached():
-        info = pdf_handler.get_info()
-        SUMMARY_TRIGGERS = ("summarize", "summary", "overview", "what is this paper about",
-                            "summarize this paper", "what's this paper about", "tl;dr",
-                            "main points", "key findings", "conclusion")
-        is_summary = any(t in message.lower() for t in SUMMARY_TRIGGERS)
-        if is_summary:
-            context = pdf_handler.get_context()
-        else:
-            relevant_chunks = pdf_rag.retrieve(message)
-            context = "\n\n---\n\n".join(relevant_chunks)
-
-        context_message = (
-            f"You are answering a question about the document '{info['filename']}'. "
-            f"Below are the most relevant excerpts. Answer using ONLY these excerpts. "
-            f"Quote exact numbers and values precisely as written. If the excerpts don't "
-            f"contain the answer, say the document doesn't appear to specify it.\n\n"
-            f"--- RELEVANT EXCERPTS ---\n{context}\n--- END EXCERPTS ---"
-        )
-        chat_history.append({"role": "user", "content": message})
-        if len(chat_history) > MAX_HISTORY_TURNS * 2:
-            del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
-        return [
-            {"role": "system", "content": context_message},
-            {"role": "user", "content": message},
-        ]
-    else:
-        chat_history.append({"role": "user", "content": message})
-        if len(chat_history) > MAX_HISTORY_TURNS * 2:
-            del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
-        return [{"role": "system", "content": LOKI_IDENTITY}, *chat_history]
-
-
-def chat_capture(message):
-    """Like chat() but returns the full reply string instead of just streaming."""
-    messages = _build_chat_messages(message)
-
-    r = requests.post(
-        OLLAMA_URL,
-        json={"model": CHAT_MODEL, "messages": messages, "stream": True, "think": False},
-        stream=True,
-    )
-    full_reply = ""
-    for line in r.iter_lines():
-        if not line:
-            continue
-        chunk = json.loads(line)
-        piece = chunk.get("message", {}).get("content", "")
-        print(piece, end="", flush=True)
-        full_reply += piece
-        if chunk.get("done"):
-            print()
-            break
-    chat_history.append({"role": "assistant", "content": full_reply})
-    return full_reply
-
-
-def chat_capture_silent(message):
-    messages = _build_chat_messages(message)
-    r = requests.post(
-        OLLAMA_URL,
-        json={"model": CHAT_MODEL, "messages": messages, "stream": False, "think": False},
-        timeout=120,
-    )
-    reply = r.json()["message"]["content"]
-    reply = re.sub(r'^[\s\'",+\-•·\u0080-\uFFFF]{1,10}(?=[A-Z])', '', reply).strip()
-    chat_history.append({"role": "assistant", "content": reply})
+        # Always send the user's own words — never the router's paraphrase
+        reply = Reply(chat(user_text, stream=stream), kind="assistant", streamed=stream)
+    reply.intent = intent
     return reply
 
 
-# Module-level reference to the bridge so handlers can post to the window.
-# Set during tray_mode() startup.
-_window_bridge = None
+# ============================================================================
+# Utility commands (handled before dispatch, no LLM)
+# ============================================================================
+UTILITY_COMMANDS = {
+    "exit":        {"exit", "quit", "bye", "goodbye", "stop", "shut down",
+                    "shutdown", "end", "close assistant"},
+    "voice_off":   {"voice off", "stop talking", "be quiet", "shush", "mute", "silence"},
+    "voice_on":    {"voice on", "speak again", "unmute", "talk to me"},
+    "reset":       {"reset", "clear", "new chat", "clear chat",
+                    "forget everything", "start over"},
+    "clear_fired": {"clear fired", "clear history", "clean up"},
+}
 
-def handle_window(user_text):
-    """Like handle()/handle_voice() but routes output through the chat window."""
-    cmd = is_utility_command(user_text)
 
-    if cmd == "exit":
-        if _window_bridge:
-            _window_bridge.quit_requested.emit()
-        return
+def is_utility_command(text):
+    """Return the command name ("exit", "reset", ...) or None."""
+    normalized = re.sub(r"[.,!?;:\s]+$", "", text.lower().strip())
+    for name, variants in UTILITY_COMMANDS.items():
+        if normalized in variants:
+            return name
+    return None
+
+
+def run_utility(cmd):
+    """Run any utility command except "exit" (each front end exits differently)."""
+    global VOICE_OUTPUT
     if cmd == "voice_off":
-        global VOICE_OUTPUT
         VOICE_OUTPUT = False
-        if _window_bridge:
-            _window_bridge.system_message.emit("Voice output disabled.")
-        return
+        return Reply("Voice output disabled.")
     if cmd == "voice_on":
         VOICE_OUTPUT = True
-        if _window_bridge:
-            _window_bridge.system_message.emit("Voice output enabled.")
-        return
+        return Reply("Voice output enabled.")
     if cmd == "reset":
         chat_history.clear()
-        if _window_bridge:
-            _window_bridge.system_message.emit("Chat history cleared.")
-        return
+        return Reply("Chat history cleared.")
+    if cmd == "clear_fired":
+        return Reply(clear_fired_reminders())
+    return Reply(f"Unknown command '{cmd}'.")
 
-    if _window_bridge:
-        _window_bridge.thinking_started.emit()
 
-    calc = try_calculator(user_text)
-    if calc is not None:
-        if _window_bridge:
-            _window_bridge.system_message.emit(f"= {calc}")
-        return
-    
-    calc_cmd = symbolic_math.parse_calculus_command(user_text)
-    if calc_cmd is not None:
-        body, error = symbolic_math.run(calc_cmd)
-        if _window_bridge:
-            _window_bridge.system_message.emit(error) if error else \
-                _window_bridge.assistant_said.emit(body)
-        return
+def _error_reply(e):
+    traceback.print_exc()
+    return Reply(f"Something went wrong: {e}", speak="Sorry, something went wrong.")
 
+
+# ============================================================================
+# Front end 1: text REPL  (python assistant.py)
+# ============================================================================
+def handle_text(user_text):
     try:
-        parsed = classify_intent(user_text)
-        intent = parsed.get("intent", "chat")
-
-        if intent == "open_app":
-            app = (parsed.get("app") or "").lower()
-            open_app(app)
-            if _window_bridge:
-                _window_bridge.system_message.emit(f"Opening {app}.")
-        elif intent == "open_url":
-            raw_browser = parsed.get("browser")
-            if raw_browser in (None, "", "null", "none", "None", "Null"):
-                browser = None
-            else:
-                browser = raw_browser.lower()
-            url = parsed.get("url", "")
-            open_url(browser, url)
-            if _window_bridge:
-                location = f"in {browser}" if browser else "in default browser"
-                _window_bridge.system_message.emit(f"Opening {url} {location}.")
-        elif intent == "close_app":
-            app = (parsed.get("app") or "").lower()
-            close_app(app)
-            if _window_bridge:
-                _window_bridge.system_message.emit(f"Closed {app}.")
-
-        elif intent == "attach_pdf":
-            handle_attach_pdf(parsed.get("path", ""))
-        elif intent == "detach_pdf":
-            handle_detach_pdf()
-
-        elif intent == "add_reminder":
-            success, msg = handle_add_reminder(parsed.get("text", ""), parsed.get("when", ""))
-            if _window_bridge:
-                _window_bridge.system_message.emit(msg)
-        elif intent == "add_recurring":
-            success, msg = handle_add_recurring(
-                parsed.get("text", ""), parsed.get("when", ""),
-                parsed.get("kind", "yearly"),
-            )
-            if _window_bridge:
-                _window_bridge.system_message.emit(msg)
-        elif intent == "list_reminders":
-            text = format_reminders_for_display()
-            if _window_bridge:
-                _window_bridge.system_message.emit(text)
-        elif intent == "cancel_reminder":
-            handle_cancel_reminder(parsed.get("ids", []))
-            if _window_bridge:
-                _window_bridge.system_message.emit("Cancelled.")
-        elif intent == "to_latex":
-            latex, error = handle_to_latex(
-                parsed.get("text", ""),
-                parsed.get("mode", "display"),
-            )
-            if _window_bridge:
-                if error:
-                    _window_bridge.system_message.emit(error)
-                else:
-                    _window_bridge.assistant_said.emit(f"```latex\n{latex}\n```")
-        elif intent == "system_info":
-            reply = handle_system_info(user_text)
-            if _window_bridge and reply:
-                _window_bridge.assistant_said.emit(reply)
-        elif intent == "web_search":
-            raw_browser = parsed.get("browser")
-            if raw_browser in (None, "", "null", "none", "None", "Null"):
-                browser = None
-            else:
-                browser = raw_browser.lower()
-            success, msg = handle_web_search(
-                parsed.get("service"),
-                parsed.get("query", ""),
-                browser,
-            )
-            if _window_bridge:
-                _window_bridge.system_message.emit(msg)
-        else:
-            reply = chat_capture_silent(user_text)
-            if _window_bridge and reply:
-                _window_bridge.assistant_said.emit(reply)
-    finally:
-        if _window_bridge:
-            _window_bridge.thinking_stopped.emit()
+        reply = dispatch(user_text, stream=True)
+    except Exception as e:
+        reply = _error_reply(e)
+    if not reply.streamed:
+        print(reply.text)
 
 
-def format_reminders_for_display():
-    rows = db.list_pending()
-    if not rows:
-        return "No upcoming reminders."
-    lines = [f"Reminders ({len(rows)}):"]
-    now = datetime.now()
-    for r in rows:
-        when = datetime.fromisoformat(r["fire_at"])
-        kind_tag = f" [{r['kind']}]" if r["kind"] != "once" else ""
-        if r["fired_at"]:
-            status = "✓ fired"
-        elif when < now:
-            status = "⚠ overdue"
-        else:
-            status = "  pending"
-        lines.append(f"  #{r['id']}{kind_tag} {status}  {when.strftime('%a %b %d %I:%M %p')}  — {r['text']}")
-    return "\n".join(lines)
-
-
-# ----------------------------
-# REPL
-# ----------------------------
-def main():
-    if "--tray" in sys.argv:
-        tray_mode()
-        return
-    
-    if "--voice" in sys.argv:
-        voice_input_loop()
-        return
-    
+def text_mode():
     reminders.start()
     print(f"Loaded {len(APPS)} apps. Router: {ROUTER_MODEL}, Chat: {CHAT_MODEL}\n")
-
     while True:
         try:
             user_input = input("you> ").strip()
@@ -1270,16 +888,229 @@ def main():
             break
         if not user_input:
             continue
-
         cmd = is_utility_command(user_input)
         if cmd == "exit":
             break
-        if cmd == "reset":
-            chat_history.clear()
-            print("(chat history cleared)")
+        if cmd:
+            print(run_utility(cmd).text)
             continue
-        
-        handle(user_input)
+        handle_text(user_input)
+
+
+# ============================================================================
+# Front end 2: terminal voice mode  (python assistant.py --voice)
+# ============================================================================
+def handle_voice(user_text):
+    cmd = is_utility_command(user_text)
+    if cmd == "exit":
+        raise KeyboardInterrupt
+    if cmd:
+        reply = run_utility(cmd)
+    else:
+        try:
+            reply = dispatch(user_text, stream=True)
+        except Exception as e:
+            reply = _error_reply(e)
+    if not reply.streamed:
+        print(reply.text)
+    if VOICE_OUTPUT and reply.spoken:
+        voice.speak(reply.spoken)
+
+
+def voice_mode():
+    """Push-to-talk: hold the hotkey to record, release to transcribe and run."""
+    reminders.start()
+    recorder = voice.Recorder()
+    print(f"\nVoice mode: hold {VOICE_HOTKEY.upper()} to talk. Release to send.")
+    print("Say 'voice off' to disable speech output.\n")
+
+    is_recording = False
+    while True:
+        try:
+            if keyboard.is_pressed(VOICE_HOTKEY):
+                if not is_recording:
+                    print("🎙  recording...", end="", flush=True)
+                    recorder.start()
+                    is_recording = True
+                time.sleep(0.05)
+                continue
+            if is_recording:                      # hotkey just released
+                audio = recorder.stop()
+                is_recording = False
+                print(" transcribing...", end="", flush=True)
+                text = voice.transcribe(audio)
+                print(f"\r🎙  you said: {text}" + " " * 20)
+                if text:
+                    handle_voice(text)
+                continue
+            time.sleep(0.05)
+        except KeyboardInterrupt:
+            break
+
+
+# ============================================================================
+# Front end 3: tray + chat window  (python assistant.py --tray)
+# ============================================================================
+def handle_window(user_text):
+    """Runs on a worker thread. Talks to the window only through bridge signals."""
+    bridge = _window_bridge
+    if bridge is None:
+        return
+
+    cmd = is_utility_command(user_text)
+    if cmd == "exit":
+        bridge.quit_requested.emit()
+        return
+    if cmd:
+        bridge.system_message.emit(run_utility(cmd).text)
+        return
+
+    bridge.thinking_started.emit()
+    try:
+        reply = dispatch(user_text)
+    except Exception as e:
+        reply = _error_reply(e)
+    finally:
+        bridge.thinking_stopped.emit()
+
+    if reply.text:
+        if reply.kind == "assistant":
+            bridge.assistant_said.emit(reply.text)
+        else:
+            print(reply.text)     # keep status messages in the log too
+            bridge.system_message.emit(reply.text)
+
+    if reply.intent in ("attach_pdf", "detach_pdf"):
+        name = pdf_handler.get_info()["filename"] if pdf_handler.is_attached() else ""
+        bridge.pdf_attached.emit(name)
+
+
+def _voice_loop_for_tray(running):
+    """F9 push-to-talk while in tray mode; results go to the chat window."""
+    recorder = voice.Recorder()
+    is_recording = False
+    while running["alive"]:
+        try:
+            if keyboard.is_pressed(VOICE_HOTKEY):
+                if not is_recording:
+                    if _window_bridge:
+                        _window_bridge.system_message.emit("🎙 Listening...")
+                    recorder.start()
+                    is_recording = True
+                time.sleep(0.05)
+                continue
+            if is_recording:
+                audio = recorder.stop()
+                is_recording = False
+                text = voice.transcribe(audio)
+                if text:
+                    if _window_bridge:
+                        _window_bridge.user_said.emit(text)
+                    handle_window(text)
+                continue
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"Voice loop error: {e}", flush=True)
+            is_recording = False
+
+
+def tray_mode():
+    global _window_bridge
+    acquire_lock()
+    reminders.start()
+
+    qt_app = QApplication.instance() or QApplication([])
+    qt_app.setQuitOnLastWindowClosed(False)
+
+    bridge = chat_window.ChatBridge()
+    _window_bridge = bridge
+    window = chat_window.ChatWindow(bridge)
+
+    # --- Everything below must be set up BEFORE qt_app.exec() ---
+
+    # Window show / quit
+    def show_window():
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    bridge.show_window_requested.connect(show_window)
+    bridge.quit_requested.connect(qt_app.quit)
+
+    # Reminder popups: the scheduler thread calls display_reminder, which
+    # emits a signal so the popup is created on the GUI thread.
+    reminders.set_display_callback(lambda title, body: bridge.reminder_fired.emit(title, body))
+    active_popups = []   # keep references so popups aren't garbage collected
+
+    def show_reminder_popup(title, body):
+        try:
+            popup = chat_window.ReminderPopup(title, body)
+            active_popups.append(popup)
+            popup.destroyed.connect(
+                lambda: active_popups.remove(popup) if popup in active_popups else None
+            )
+            popup.show()
+            popup.raise_()
+            popup.activateWindow()
+        except Exception as e:
+            print(f"[POPUP] FAILED: {e}", flush=True)
+            traceback.print_exc()
+
+    bridge.reminder_fired.connect(show_reminder_popup)
+
+    # Typed messages: show immediately, handle on a worker thread so the
+    # window stays responsive while the LLM works
+    def on_submit(text):
+        bridge.user_said.emit(text)
+        threading.Thread(target=handle_window, args=(text,), daemon=True).start()
+
+    window.submit_requested.connect(on_submit)
+
+    # Tray icon
+    running = {"alive": True}
+
+    def quit_cb():
+        running["alive"] = False
+        bridge.quit_requested.emit()
+
+    def voice_toggle_cb():
+        global VOICE_OUTPUT
+        VOICE_OUTPUT = not VOICE_OUTPUT
+
+    tray = tray_module.TrayApp(
+        on_quit=quit_cb,
+        on_voice_toggle=voice_toggle_cb,
+        get_voice_status=lambda: VOICE_OUTPUT,
+        on_open_chat=bridge.show_window_requested.emit,
+    )
+    tray.run_in_thread()
+
+    voice_thread = threading.Thread(target=_voice_loop_for_tray, args=(running,), daemon=True)
+    voice_thread.start()
+
+    qt_app.exec()          # blocks until quit
+    running["alive"] = False
+    voice_thread.join(timeout=1.0)
+
+    # Leftover background threads (tray icon, scheduler, web engine) can keep
+    # Python alive after the window closes. Release the lock and exit for
+    # real so restarting Loki always works.
+    release_lock()
+    sys.stdout.flush()
+    os._exit(0)
+
+
+# ============================================================================
+# Entry point
+# ============================================================================
+def main():
+    if "--tray" in sys.argv:
+        tray_mode()
+    elif "--voice" in sys.argv:
+        voice_mode()
+    else:
+        text_mode()
+
 
 if __name__ == "__main__":
     main()
