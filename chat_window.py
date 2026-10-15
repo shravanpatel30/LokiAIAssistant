@@ -1,25 +1,52 @@
-"""Chat window UI for the assistant."""
+"""Chat window UI for Loki.
+
+The conversation is shown in an embedded web view (web/chat.html) so replies
+get proper markdown and KaTeX math rendering. Everything else — input box,
+status line, tray behavior, reminder popup — is regular Qt.
+"""
 import json
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (Qt, Signal, QObject, QTimer,
-    QPropertyAnimation, QEasingCurve, QRect)
-from PySide6.QtGui import (
-    QTextCursor, QKeySequence, QShortcut, QFont,
-    QTextBlockFormat, QIcon, QFontDatabase
+from PySide6.QtCore import (
+    Qt, Signal, QObject, QTimer, QUrl, QPropertyAnimation, QEasingCurve,
 )
+from PySide6.QtGui import QFont, QIcon, QColor, QDesktopServices
+from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
+from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTextEdit, QTextBrowser, QLineEdit, QPushButton, QLabel, QFrame
+    QLineEdit, QPushButton, QLabel, QFrame, QMenu,
 )
-import markdown
 
-HISTORY_FILE = Path(__file__).parent / "chat_history.jsonl"
-WINDOW_HISTORY_LIMIT = 50  # messages kept in the visible window
-DISK_HISTORY_LIMIT = 1000  # most recent N messages persisted
+BASE_DIR = Path(__file__).parent
+CHAT_PAGE = BASE_DIR / "web" / "chat.html"
+KATEX_JS = BASE_DIR / "web" / "vendor" / "katex" / "katex.min.js"
+HISTORY_FILE = BASE_DIR / "chat_history.jsonl"
+ICON_FILE = BASE_DIR / "AI_Icon.png"
+
+WINDOW_HISTORY_LIMIT = 50   # messages shown when the window opens
+DISK_HISTORY_LIMIT = 1000   # most recent N messages kept on disk
 
 
+# ---------------------------------------------------------------------------
+# Signals between the assistant (background threads) and the GUI thread
+# ---------------------------------------------------------------------------
+class ChatBridge(QObject):
+    user_said = Signal(str)
+    assistant_said = Signal(str)
+    system_message = Signal(str)
+    show_window_requested = Signal()
+    quit_requested = Signal()
+    thinking_started = Signal()
+    thinking_stopped = Signal()
+    pdf_attached = Signal(str)          # filename, or "" when detached
+    reminder_fired = Signal(str, str)   # title, body
+
+
+# ---------------------------------------------------------------------------
+# Reminder popup (unchanged)
+# ---------------------------------------------------------------------------
 class ReminderPopup(QWidget):
     """Bottom-right notification popup with top accent bar and fade-in."""
 
@@ -109,7 +136,7 @@ class ReminderPopup(QWidget):
         header.addStretch()
         content.addLayout(header)
 
-        # Title text (the actual reminder body, larger)
+        # The reminder text itself, larger
         title_label = QLabel(body)
         title_label.setObjectName("titleText")
         title_label.setWordWrap(True)
@@ -119,8 +146,7 @@ class ReminderPopup(QWidget):
 
         # Bottom row: time on left, button on right
         bottom = QHBoxLayout()
-        time_str = self._format_time()
-        time_label = QLabel(f"🕓  {time_str}")
+        time_label = QLabel(f"🕓  {self._format_time()}")
         time_label.setObjectName("timeText")
         bottom.addWidget(time_label)
         bottom.addStretch()
@@ -138,11 +164,7 @@ class ReminderPopup(QWidget):
         self._fade_in()
 
     def _format_time(self):
-        now = datetime.now()
-        today = now.date()
-        if now.date() == today:
-            return f"Today {now.strftime('%I:%M %p').lstrip('0')}"
-        return now.strftime("%a %b %d %I:%M %p")
+        return f"Today {datetime.now().strftime('%I:%M %p').lstrip('0')}"
 
     def _position_bottom_right(self):
         screen = QApplication.primaryScreen().availableGeometry()
@@ -159,90 +181,123 @@ class ReminderPopup(QWidget):
         self._fade_animation.setEndValue(1.0)
         self._fade_animation.setEasingCurve(QEasingCurve.OutCubic)
         self._fade_animation.start()
-        
 
+
+# ---------------------------------------------------------------------------
+# "Loki is thinking..." indicator in the status line
+# ---------------------------------------------------------------------------
 class Throbber:
-    """Cycles status text to show the assistant is working."""
-    FRAMES = ["Loki is thinking", "Loki is thinking.", "Loki is thinking..", "Loki is thinking..."]
+    FRAMES = ["Loki is thinking", "Loki is thinking.",
+              "Loki is thinking..", "Loki is thinking..."]
 
-    def __init__(self, status_label):
+    def __init__(self, status_label, idle_text):
         self.status_label = status_label
+        self.idle_text = idle_text          # function returning the resting text
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
         self.frame = 0
 
+    @property
+    def running(self):
+        return self.timer.isActive()
+
     def start(self):
         self.frame = 0
         self.status_label.setText(self.FRAMES[0])
-        self.timer.start(400)  # ms between frames
+        self.timer.start(400)
 
     def stop(self):
         self.timer.stop()
-        self.status_label.setText("Ready")
+        self.status_label.setText(self.idle_text())
 
     def _tick(self):
         self.frame = (self.frame + 1) % len(self.FRAMES)
         self.status_label.setText(self.FRAMES[self.frame])
 
 
-class ChatBridge(QObject):
-    user_said = Signal(str)
-    assistant_said = Signal(str)
-    system_message = Signal(str)
-    show_window_requested = Signal()
-    quit_requested = Signal()
-    thinking_started = Signal()
-    thinking_stopped = Signal()
-    pdf_attached = Signal(str)
-    reminder_fired = Signal(str, str)   # title, body
+# ---------------------------------------------------------------------------
+# Web page wrapper: keeps the chat page from navigating away
+# ---------------------------------------------------------------------------
+class ChatPage(QWebEnginePage):
+    """Links open in your normal browser; a PDF dropped onto the chat is
+    reported via pdf_dropped instead of being opened in the view."""
+
+    pdf_dropped = Signal(str)
+
+    def __init__(self, home_path, parent=None):
+        super().__init__(parent)
+        self.home_path = Path(home_path).resolve()
+
+    def acceptNavigationRequest(self, url, nav_type, is_main_frame):
+        if url.isLocalFile():
+            path = Path(url.toLocalFile())
+            if path.resolve() == self.home_path:
+                return True                               # our own chat page
+            if path.suffix.lower() == ".pdf":
+                self.pdf_dropped.emit(str(path))
+        elif url.scheme() in ("http", "https", "mailto"):
+            QDesktopServices.openUrl(url)
+        return False                                      # never leave the chat
+
+    def createWindow(self, _type):
+        return None   # ignore "open in new window" requests
+
+    def javaScriptConsoleMessage(self, level, message, line, source):
+        # JS errors end up in the log instead of disappearing
+        print(f"[chat.js:{line}] {message}", flush=True)
 
 
+# ---------------------------------------------------------------------------
+# Main chat window
+# ---------------------------------------------------------------------------
 class ChatWindow(QMainWindow):
-    submit_requested = Signal(str)  # user typed something and pressed Enter
+    submit_requested = Signal(str)   # user typed something and pressed Enter
 
     def __init__(self, bridge):
         super().__init__()
         self.bridge = bridge
         self.setWindowTitle("Loki")
         self.resize(700, 600)
+        self.setWindowIcon(QIcon(str(ICON_FILE)))
+        self.setAcceptDrops(True)
 
-        icon_path = str(Path(__file__).parent / "AI_Icon.png")
-        self.setWindowIcon(QIcon(icon_path))
-
-        # Central widget + layout
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
-        self.setAcceptDrops(True)
 
-        # Chat history view (read-only)
-        self.history_view = QTextBrowser()
-        self.history_view.setOpenLinks(False)        # we handle clicks ourselves
-        self.history_view.setOpenExternalLinks(False)
-        self.history_view.anchorClicked.connect(self._on_anchor_clicked)
-        self.history_view.setReadOnly(True)
-        self.history_view.setStyleSheet("""
-            QTextEdit {
-                background-color: #131314;
-                color: #E3E3E3;
-                border: none;
-                padding: 12px;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 11pt;
-            }
-        """)
-        self.history_view.setLineWrapMode(QTextEdit.WidgetWidth)
-        layout.addWidget(self.history_view)
+        # --- Conversation view (web page) ---
+        self._page_ready = False
+        self._pending_js = []      # calls made before the page finished loading
 
-        self._code_snippets = {}  # snippet_id → raw code text
-        self._next_snippet_id = 0
+        self.view = QWebEngineView()
+        home_url = QUrl.fromLocalFile(str(CHAT_PAGE.resolve()))
+        self.page = ChatPage(CHAT_PAGE, self.view)
+        self.page.setBackgroundColor(QColor("#131314"))   # no white flash on load
+        self.page.pdf_dropped.connect(self._on_pdf_dropped)
+        self.page.loadFinished.connect(self._on_page_loaded)
+        self.view.setPage(self.page)
 
-        # Input row
+        settings = self.view.settings()
+        settings.setAttribute(QWebEngineSettings.WebAttribute.JavascriptCanAccessClipboard, True)
+        settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+
+        # Let drops fall through to the window (handled in dropEvent below)
+        self.view.setAcceptDrops(False)
+
+        # Right-click menu with just "Copy" (the default one has Reload/Back,
+        # which would wipe the chat)
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
+
+        self.view.load(home_url)
+        layout.addWidget(self.view)
+
+        # --- Input row ---
         input_row = QHBoxLayout()
         self.input_box = QLineEdit()
-        self.input_box.setPlaceholderText("Type a message and press Enter (Shift+Enter for newline)...")
+        self.input_box.setPlaceholderText("Type a message and press Enter...")
         self.input_box.setStyleSheet("""
             QLineEdit {
                 background-color: #1E1F20;
@@ -271,43 +326,77 @@ class ChatWindow(QMainWindow):
         """)
         self.send_button.clicked.connect(self._on_submit)
         input_row.addWidget(self.send_button)
-
         layout.addLayout(input_row)
 
-        # Status label at the bottom
-        self.status = QLabel("Ready")
+        # --- Status line ---
+        self._idle_status = "Ready"
+        self.status = QLabel(self._idle_status)
         self.status.setStyleSheet("color: #6c7086; font-size: 9pt; padding: 4px;")
         layout.addWidget(self.status)
+        self.throbber = Throbber(self.status, lambda: self._idle_status)
 
-        self.throbber = Throbber(self.status)
-
-        # Wire bridge signals to window slots
+        # --- Bridge signals ---
         bridge.user_said.connect(self._append_user)
         bridge.assistant_said.connect(self._append_assistant)
         bridge.system_message.connect(self._append_system)
-
         bridge.thinking_started.connect(self.throbber.start)
         bridge.thinking_stopped.connect(self.throbber.stop)
+        bridge.pdf_attached.connect(lambda f: self.set_pdf_status(f or None))
 
-        bridge.pdf_attached.connect(lambda f: self.set_pdf_status(f if f else None))
-
+        # A PDF may already be attached if the window was rebuilt
         try:
             import pdf_handler
             if pdf_handler.is_attached():
-                info = pdf_handler.get_info()
-                self.set_pdf_status(info["filename"])
+                self.set_pdf_status(pdf_handler.get_info()["filename"])
         except ImportError:
             pass
 
-        # Load recent history from disk
+        if not KATEX_JS.exists():
+            self._append_system(
+                "Math/markdown libraries not found — run "
+                "'python setup_web_assets.py' once, then restart Loki."
+            )
+
         self._load_recent_history()
 
     def closeEvent(self, event):
-        """Hide instead of close — the tray icon remains, window can be reopened."""
+        """Hide instead of close — the tray icon stays, window can be reopened."""
         event.ignore()
         self.hide()
 
-    # ---- Public-ish actions ----
+    # ---- Sending text to the page ----
+    def _run_js(self, code):
+        if self._page_ready:
+            self.page.runJavaScript(code)
+        else:
+            self._pending_js.append(code)
+
+    def _on_page_loaded(self, ok):
+        if not ok:
+            print(f"(chat page failed to load: {CHAT_PAGE})", flush=True)
+            return
+        self._page_ready = True
+        for code in self._pending_js:
+            self.page.runJavaScript(code)
+        self._pending_js.clear()
+
+    def _add_message(self, role, text):
+        # json.dumps turns any Python string into a safe JavaScript string literal
+        self._run_js(f"addMessage({json.dumps(role)}, {json.dumps(text)});")
+
+    # ---- Message slots (called via bridge signals, on the GUI thread) ----
+    def _append_user(self, text):
+        self._add_message("user", text)
+        self._save_to_disk("user", text)
+
+    def _append_assistant(self, text):
+        self._add_message("assistant", text)
+        self._save_to_disk("assistant", text)
+
+    def _append_system(self, text):
+        self._add_message("system", text)
+
+    # ---- Input ----
     def _on_submit(self):
         text = self.input_box.text().strip()
         if not text:
@@ -315,162 +404,64 @@ class ChatWindow(QMainWindow):
         self.input_box.clear()
         self.submit_requested.emit(text)
 
-    def _append_user(self, text):
-        self._append_message("you", text, color="#a6e3a1")
-        self._save_to_disk("user", text)
+    def _show_context_menu(self, pos):
+        menu = QMenu(self)
+        copy = menu.addAction("Copy")
+        copy.setEnabled(self.page.hasSelection())
+        copy.triggered.connect(lambda: self.page.triggerAction(QWebEnginePage.Copy))
+        menu.exec(self.view.mapToGlobal(pos))
 
-    def _append_assistant(self, text):
-        self._append_message("assistant", text, color="#89b4fa", as_markdown=True)
-        self._save_to_disk("assistant", text)
-
-    def _append_system(self, text):
-        self._append_message("·", text, color="#6c7086")
-
-    def _append_message(self, role, text, color="#E3E3E3", as_markdown=False):
-        if as_markdown:
-            body_html = self._render_markdown_with_code_blocks(text)
-        else:
-            body_html = (text.replace("&", "&amp;")
-                            .replace("<", "&lt;")
-                            .replace(">", "&gt;")
-                            .replace("\n", "<br>"))
-
-        cursor = self.history_view.textCursor()
-        cursor.movePosition(QTextCursor.End)
-
-        # Reset block format to clear any leftover list/heading state from prior content
-        from PySide6.QtGui import QTextBlockFormat, QTextListFormat
-        if not self.history_view.document().isEmpty():
-            cursor.insertBlock()
-            cursor.insertBlock()
-
-        # Force a clean block format — no list, no indent, no inherited styling
-        clean_format = QTextBlockFormat()
-        cursor.setBlockFormat(clean_format)
-
-        # Inline role + content on the same logical line
-        inline_html = (
-            f'<span style="color:{color};font-weight:bold;">{role}:</span> '
-            f'<span style="color:#E3E3E3;">{body_html}</span>'
-        )
-        cursor.insertHtml(inline_html)
-
-        self.history_view.setTextCursor(cursor)
-        self.history_view.ensureCursorVisible()
-
-
-    def _render_markdown_with_code_blocks(self, text):
-        """Convert markdown to HTML, replacing code blocks with our styled version."""
-        import re
-
-        # First, extract fenced code blocks BEFORE markdown processing
-        # so we can render them as raw HTML with our styling.
-        placeholders = {}
-
-        def stash_code(match):
-            lang = match.group(1) or ""
-            code = match.group(2)
-            placeholder = f"@@CODE_BLOCK_{len(placeholders)}@@"
-            placeholders[placeholder] = (lang, code)
-            return placeholder
-
-        # Match ```lang\ncode\n```
-        text_no_code = re.sub(
-            r"```([\w+\-]*)\n(.*?)\n```",
-            stash_code,
-            text,
-            flags=re.DOTALL,
-        )
-
-        # Run markdown on the remaining text
-        html = markdown.markdown(text_no_code, extensions=["tables"])
-
-        # Now restore code blocks with our custom HTML
-        for placeholder, (lang, code) in placeholders.items():
-            snippet_id = self._next_snippet_id
-            self._next_snippet_id += 1
-            self._code_snippets[snippet_id] = code
-
-            # Escape code for HTML display
-            code_escaped = (code.replace("&", "&amp;")
-                                .replace("<", "&lt;")
-                                .replace(">", "&gt;"))
-
-            lang_label = lang.upper() if lang else "CODE"
-
-            block_html = (
-                f'<table cellpadding="0" cellspacing="0" width="100%" '
-                f'style="background-color:#1E1F20;margin:8px 0;">'
-                f'<tr>'
-                f'<td style="background-color:#2a2a2e;padding:6px 10px;">'
-                f'<span style="color:#9aa0a6;font-family:Consolas,monospace;'
-                f'font-size:9pt;">{lang_label}</span>'
-                f'</td>'
-                f'<td align="right" style="background-color:#2a2a2e;padding:6px 10px;">'
-                f'<a href="copy:{snippet_id}" style="color:#89b4fa;'
-                f'text-decoration:none;font-size:9pt;">📋 Copy</a>'
-                f'</td>'
-                f'</tr>'
-                f'<tr><td colspan="2" style="padding:10px;">'
-                f'<pre style="margin:0;color:#E3E3E3;font-family:Consolas,monospace;'
-                f'font-size:10pt;white-space:pre-wrap;">{code_escaped}</pre>'
-                f'</td></tr>'
-                f'</table>'
-            )
-            html = html.replace(placeholder, block_html)
-
-        # Style inline code too
-        html = re.sub(
-            r"<code>([^<]+)</code>",
-            r'<code style="background-color:#1E1F20;padding:1px 5px;'
-            r'font-family:Consolas,monospace;color:#E3E3E3;">\1</code>',
-            html,
-        )
-
-        return html
-
-    def _on_anchor_clicked(self, url):
-        """Handle clicks on links in the history view."""
-        url_str = url.toString()
-        if url_str.startswith("copy:"):
-            try:
-                snippet_id = int(url_str.split(":", 1)[1])
-                code = self._code_snippets.get(snippet_id)
-                if code is not None:
-                    QApplication.clipboard().setText(code)
-                    self.set_status(f"Copied {len(code)} characters to clipboard")
-            except (ValueError, IndexError):
-                pass
-
+    # ---- Status line ----
     def set_status(self, text):
         self.status.setText(text)
 
+    def set_pdf_status(self, filename=None):
+        self._idle_status = f"📄 {filename} attached  •  Ready" if filename else "Ready"
+        if not self.throbber.running:
+            self.status.setText(self._idle_status)
+
+    # ---- Drag and drop PDFs ----
+    def dragEnterEvent(self, event):
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if any(u.toLocalFile().lower().endswith(".pdf") for u in urls):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(".pdf"):
+                self._on_pdf_dropped(path)
+                break
+        event.acceptProposedAction()
+
+    def _on_pdf_dropped(self, path):
+        # Same as if the user typed "read <path>"
+        self.submit_requested.emit(f"read {path}")
+
     # ---- Persistence ----
     def _save_to_disk(self, role, text):
-        """Append a single message to the JSONL history file. Trim if too long."""
-        record = {
-            "ts": datetime.now().isoformat(),
-            "role": role,
-            "text": text,
-        }
+        """Append one message to the JSONL history file; trim when too long."""
+        record = {"ts": datetime.now().isoformat(), "role": role, "text": text}
         try:
             with open(HISTORY_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
         except Exception as e:
             print(f"(history write failed: {e})")
+            return
 
-        # Trim if over limit (rare path — only when file gets big)
         try:
             with open(HISTORY_FILE, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            if len(lines) > DISK_HISTORY_LIMIT * 1.2:  # only trim when 20% over
+            if len(lines) > DISK_HISTORY_LIMIT * 1.2:    # trim when 20% over
                 with open(HISTORY_FILE, "w", encoding="utf-8") as f:
                     f.writelines(lines[-DISK_HISTORY_LIMIT:])
         except Exception:
             pass
 
     def _load_recent_history(self):
-        """Load the last WINDOW_HISTORY_LIMIT messages into the view."""
+        """Show the last WINDOW_HISTORY_LIMIT saved messages."""
         if not HISTORY_FILE.exists():
             return
         try:
@@ -478,37 +469,7 @@ class ChatWindow(QMainWindow):
                 lines = f.readlines()[-WINDOW_HISTORY_LIMIT:]
             for line in lines:
                 rec = json.loads(line)
-                role = rec.get("role")
-                text = rec.get("text", "")
-                if role == "user":
-                    self._append_message("you", text, color="#a6e3a1")
-                elif role == "assistant":
-                    self._append_message("assistant", text, color="#89b4fa", as_markdown=True)
+                if rec.get("role") in ("user", "assistant"):
+                    self._add_message(rec["role"], rec.get("text", ""))
         except Exception as e:
             print(f"(history read failed: {e})")
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            # Only accept PDFs
-            urls = event.mimeData().urls()
-            if any(u.toLocalFile().lower().endswith(".pdf") for u in urls):
-                event.acceptProposedAction()
-                return
-        event.ignore()
-
-    def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith(".pdf"):
-                # Emit as if the user typed "read <path>"
-                self.submit_requested.emit(f"read {path}")
-                break
-        event.acceptProposedAction()
-
-    def set_pdf_status(self, filename=None):
-        if filename:
-            self.status.setText(f"📄 {filename} attached  •  Ready")
-        else:
-            self.status.setText("Ready")
-
-

@@ -55,7 +55,12 @@
   }
 
   // ---------- Markdown ----------
-  marked.use({
+  // If web/vendor/ is missing (setup_web_assets.py not run), fall back to
+  // plain text instead of showing nothing.
+  const LIBS_OK = typeof marked !== "undefined" && typeof katex !== "undefined";
+  root.LIBS_OK = LIBS_OK;
+
+  if (LIBS_OK) marked.use({
     gfm: true,
     breaks: false,
     renderer: {
@@ -80,6 +85,7 @@
   });
 
   function renderMarkdown(src) {
+    if (!LIBS_OK) return "<p style='white-space:pre-wrap'>" + escapeHtml(src) + "</p>";
     const [safe, stash] = protectMath(src);
     const html = marked.parse(safe);
     return html.replace(PLACEHOLDER_RE, (_, i) => stash[+i]);
@@ -130,7 +136,8 @@
 
     wrap.append(label, body);
     document.getElementById("messages").appendChild(wrap);
-    window.scrollTo(0, document.body.scrollHeight);
+    // Wait a frame so the new message (and its math) has its final height
+    requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight));
   };
 
   root.clearMessages = function () {

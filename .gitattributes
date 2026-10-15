@@ -1,0 +1,9 @@
+# Normalize line endings: LF in the repo, your OS default on checkout
+* text=auto
+
+# Third-party files: store exactly as downloaded
+web/vendor/** binary
+
+# Images
+*.png binary
+*.ico binary
