@@ -210,7 +210,9 @@ Rules:
 - "find images of <X>", "google images of <X>" -> web_search with service="images".
 - The browser field is ONLY for when the user explicitly names a browser ("in chrome", "on firefox", "using edge"). If the user does not name a specific browser, set browser to null. Do NOT default to "chrome" or any other browser. The user's system default browser will be used when browser is null.
 - Always include the browser field in the JSON, even when null. Example: {"intent": "web_search", "service": "maps", "query": "...", "browser": null}
-- For the query field, strip the search-command words and keep only the subject. Example: "open the map of chicago illinois in chrome" -> service="maps", query="chicago illinois", browser="chrome"."""
+- For the query field, strip the search-command words and keep only the subject. Example: "open the map of chicago illinois in chrome" -> service="maps", query="chicago illinois", browser="chrome".
+- Use web_search ONLY when the user explicitly wants to search, browse, or open a page, otherwise default to chat. Trigger phrases examples: "search for", "look up X on <service>", "open the map of", "find X on", "google X", "show me X on youtube".
+"""
 
 
 VALID_INTENTS = {
