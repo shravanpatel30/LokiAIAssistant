@@ -12,6 +12,7 @@
   --code-bg:        #1E1F20;   /* code block + inline code background */
   --code-header:    #2a2a2e;   /* code block header strip */
   --border:         #2a2a2e;   /* tables, quotes */
+  --accent:         #534AB7;   /* reasoning sidebar (matches the 🧠 button) */
   --code-radius:    0px;       /* try 8px for rounded code blocks */
 
   /* Google Sans + Google Sans Code (bundled in web/vendor/fonts). Swap in any
@@ -19,7 +20,7 @@
      KaTeX's own Computer Modern-style fonts. */
   --font:           "Google Sans", "Segoe UI", system-ui, sans-serif;
   --font-mono:      "Google Sans Code", Consolas, "Cascadia Mono", monospace;
-  --font-size:      12pt;
+  --font-size:      11pt;
   --code-size:      10pt;
   --code-label:     9pt;
   --message-gap:    1.4em;     /* space between messages */
@@ -105,6 +106,26 @@ html, body {
   font-size: var(--code-size);
   color: var(--text);
 }
+
+/* ---------- thinking-mode reasoning (collapsed by default) ---------- */
+details.reasoning { margin: 4px 0 8px; }
+details.reasoning > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.9em;
+  user-select: none;
+  width: fit-content;
+}
+details.reasoning > summary:hover { color: var(--text); }
+.reasoning-body {
+  margin: 6px 0 4px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-dim);
+  font-size: 0.92em;
+}
+.reasoning-body > :first-child { margin-top: 0; }
+.reasoning-body > :last-child  { margin-bottom: 0; }
 
 /* ---------- math ---------- */
 .katex { font-size: 1.08em; }

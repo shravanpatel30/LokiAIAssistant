@@ -1,7 +1,7 @@
 """Symbolic calculus via SymPy."""
 import re
 import requests
-from sympy import integrate, diff, latex, Symbol, E
+from sympy import integrate, diff, latex, Symbol, E, Integral, N
 from sympy.parsing.sympy_parser import (
     parse_expr, standard_transformations, implicit_multiplication_application
 )
@@ -111,13 +111,43 @@ def do_integrate(expr_text, lower=None, upper=None):
             hi, err_hi = parse_expression(str(upper))
             if err_lo or err_hi:
                 return None, err_lo or err_hi
-            info.update(lower_latex=latex(lo), upper_latex=latex(hi),
-                        result_latex=latex(integrate(expr, (v, lo, hi))))
+            info.update(lower_latex=latex(lo), upper_latex=latex(hi))
+            result = integrate(expr, (v, lo, hi))
+            if result.has(Integral):
+                # No closed form (e.g. the Gamma function) — SymPy hands the
+                # integral back unsolved, so evaluate it numerically instead
+                value = _approx(Integral(expr, (v, lo, hi)))
+                if value is None:
+                    return None, ("This integral has no closed form, and it can't be "
+                                  "evaluated numerically (are the bounds numbers?).")
+                info["numeric_only"] = value
+            else:
+                info["result_latex"] = latex(result)
+                info["approx"] = _approx(result, skip_rational=True)
         else:
-            info["result_latex"] = latex(integrate(expr, v))
+            result = integrate(expr, v)
+            if result.has(Integral):
+                return None, (f"No closed-form antiderivative exists for {expr}. "
+                              f"Give bounds to get a numerical value, e.g. "
+                              f"'integrate {expr_text} from 0 to 1'.")
+            info["result_latex"] = latex(result)
         return info, None
     except Exception as e:
         return None, f"Couldn't integrate: {e}"
+
+
+def _approx(value, skip_rational=False):
+    """Decimal value (12 significant digits) as a string, or None if `value`
+    isn't a plain number. skip_rational: don't bother for 1/3, 12, etc."""
+    try:
+        if skip_rational and value.is_Rational:
+            return None
+        num = N(value, 12)
+        if not num.is_number or num.has(Integral) or not num.is_real:
+            return None
+        return str(num).rstrip("0").rstrip(".") if "." in str(num) else str(num)
+    except Exception:
+        return None
 
 
 def do_differentiate(expr_text, at=None):
@@ -133,8 +163,10 @@ def do_differentiate(expr_text, at=None):
             point, err_at = parse_expression(str(at))
             if err_at:
                 return None, err_at
+            value = derivative.subs(v, point)
             info["point_latex"] = latex(point)
-            info["evaluated_latex"] = latex(derivative.subs(v, point))
+            info["evaluated_latex"] = latex(value)
+            info["approx"] = _approx(value, skip_rational=True)   # cos(1) ≈ 0.540302305868
         return info, None
     except Exception as e:
         return None, f"Couldn't differentiate: {e}"
@@ -182,12 +214,20 @@ def run(cmd):
         info, err = do_integrate(cmd["expr"], cmd.get("lower"), cmd.get("upper"))
         if err:
             return None, err
-        f, v, res = info["input_latex"], info["var"], info["result_latex"]
+        f, v = info["input_latex"], info["var"]
         if "lower_latex" in info:
-            eq = (f"\\int_{{{info['lower_latex']}}}^{{{info['upper_latex']}}} "
-                  f"{f} \\, d{v} = {res}")
+            lhs = f"\\int_{{{info['lower_latex']}}}^{{{info['upper_latex']}}} {f} \\, d{v}"
+            if "numeric_only" in info:
+                body = _show("Definite integral (numerical)",
+                             f"{lhs} \\approx {info['numeric_only']}")
+                return body + ("\n\nNo closed form exists, so this value was computed "
+                               "numerically (12 significant digits)."), None
+            eq = f"{lhs} = {info['result_latex']}"
+            if info.get("approx"):
+                eq += f" \\approx {info['approx']}"
             return _show("Definite integral", eq), None
-        return _show("Indefinite integral", f"\\int {f} \\, d{v} = {res} + C"), None
+        return _show("Indefinite integral",
+                     f"\\int {f} \\, d{v} = {info['result_latex']} + C"), None
 
     info, err = do_differentiate(cmd["expr"], cmd.get("at"))
     if err:
@@ -197,5 +237,7 @@ def run(cmd):
     if "evaluated_latex" in info:
         at_eq = (f"\\left. \\frac{{d}}{{d{v}}} \\left( {f} \\right) "
                  f"\\right|_{{{v} = {info['point_latex']}}} = {info['evaluated_latex']}")
+        if info.get("approx"):
+            at_eq += f" \\approx {info['approx']}"
         body += "\n\n" + _show(f"Evaluated at {cmd['at']}", at_eq)
     return body, None

@@ -67,6 +67,7 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 
 VOICE_HOTKEY = "f9"     # press and hold to talk
 VOICE_OUTPUT = False    # speak replies out loud
+THINKING = False        # thinking mode: reason before answering (chat + PDF Q&A only)
 
 MAX_HISTORY_TURNS = 10  # chat turns the model remembers
 
@@ -404,34 +405,50 @@ def _strip_leading_junk(reply):
 
 
 def chat(message, stream=False):
-    """Ask the chat model. With stream=True the reply is printed to the
-    terminal as it arrives (text and voice modes). Returns the full reply."""
+    """Ask the chat model (general chat and PDF questions).
+
+    This is the ONLY call that follows the thinking-mode toggle; the router,
+    LaTeX, system info and calculus calls always use think=False.
+
+    With stream=True the answer is printed to the terminal as it arrives
+    (text and voice modes). Returns (answer, reasoning) — reasoning is ""
+    when thinking mode is off."""
+    thinking = THINKING
     payload = {
         "model": CHAT_MODEL,
         "messages": _build_chat_messages(message),
         "stream": stream,
-        "think": False,
+        "think": thinking,
     }
+    # Reasoning can run for a minute or more before the answer starts
+    timeout = 600 if thinking else 120
+
     if stream:
-        reply = ""
-        with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120) as r:
+        answer, reasoning = "", ""
+        with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=timeout) as r:
             for line in r.iter_lines():
                 if not line:
                     continue
                 chunk = json.loads(line)
-                piece = chunk.get("message", {}).get("content", "")
+                msg = chunk.get("message", {})
+                if msg.get("thinking"):
+                    if not reasoning:
+                        print("🧠 reasoning...", flush=True)
+                    reasoning += msg["thinking"]
+                piece = msg.get("content", "")
                 print(piece, end="", flush=True)
-                reply += piece
+                answer += piece
                 if chunk.get("done"):
                     print()
                     break
     else:
-        r = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        reply = r.json()["message"]["content"]
+        r = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
+        msg = r.json()["message"]
+        answer, reasoning = msg.get("content", ""), msg.get("thinking") or ""
 
-    reply = _strip_leading_junk(reply)
-    _remember("assistant", reply)
-    return reply
+    answer = _strip_leading_junk(answer)
+    _remember("assistant", answer)   # reasoning is never put back into the history
+    return answer, reasoning.strip()
 
 
 # ============================================================================
@@ -713,6 +730,7 @@ class Reply:
     speak: Optional[str] = None     # what voice mode says (default: the text itself)
     intent: Optional[str] = None
     streamed: bool = False          # already printed to the terminal while streaming
+    reasoning: str = ""             # thinking-mode reasoning, shown collapsed in the window
 
     @property
     def spoken(self):
@@ -821,7 +839,8 @@ def dispatch(user_text, stream=False):
         reply = handler(parsed, user_text)
     else:
         # Always send the user's own words — never the router's paraphrase
-        reply = Reply(chat(user_text, stream=stream), kind="assistant", streamed=stream)
+        answer, reasoning = chat(user_text, stream=stream)
+        reply = Reply(answer, kind="assistant", streamed=stream, reasoning=reasoning)
     reply.intent = intent
     return reply
 
@@ -837,6 +856,8 @@ UTILITY_COMMANDS = {
     "reset":       {"reset", "clear", "new chat", "clear chat",
                     "forget everything", "start over"},
     "clear_fired": {"clear fired", "clear history", "clean up"},
+    "think_on":    {"think on", "thinking on", "thinking mode on", "reasoning on"},
+    "think_off":   {"think off", "thinking off", "thinking mode off", "reasoning off"},
 }
 
 
@@ -863,7 +884,20 @@ def run_utility(cmd):
         return Reply("Chat history cleared.")
     if cmd == "clear_fired":
         return Reply(clear_fired_reminders())
+    if cmd in ("think_on", "think_off"):
+        return Reply(set_thinking(cmd == "think_on"))
     return Reply(f"Unknown command '{cmd}'.")
+
+
+def set_thinking(on):
+    """Turn thinking mode on/off. Returns a status message."""
+    global THINKING
+    THINKING = bool(on)
+    print(f"[thinking mode {'ON' if THINKING else 'OFF'}]", flush=True)
+    if THINKING:
+        return ("Thinking mode on — chat and PDF answers will reason first "
+                "(slower). Reminders, calculus, etc. are unaffected.")
+    return "Thinking mode off."
 
 
 def _error_reply(e):
@@ -970,6 +1004,8 @@ def handle_window(user_text):
         return
     if cmd:
         bridge.system_message.emit(run_utility(cmd).text)
+        if cmd in ("think_on", "think_off"):
+            bridge.thinking_mode_changed.emit(THINKING)   # keep the 🧠 button in sync
         return
 
     bridge.thinking_started.emit()
@@ -982,7 +1018,7 @@ def handle_window(user_text):
 
     if reply.text:
         if reply.kind == "assistant":
-            bridge.assistant_said.emit(reply.text)
+            bridge.assistant_said.emit(reply.text, reply.reasoning)
         else:
             print(reply.text)     # keep status messages in the log too
             bridge.system_message.emit(reply.text)
@@ -1078,6 +1114,11 @@ def tray_mode():
         threading.Thread(target=handle_window, args=(text,), daemon=True).start()
 
     window.submit_requested.connect(on_submit)
+
+    # The 🧠 button in the window turns thinking mode on/off
+    window.thinking_toggled.connect(
+        lambda on: bridge.system_message.emit(set_thinking(on))
+    )
 
     # Tray icon
     running = {"alive": True}

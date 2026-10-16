@@ -221,6 +221,16 @@ These work in any mode and don't go through the LLM:
 | `voice on`, `speak again` | Re-enable spoken replies |
 | `reset`, `clear`, `new chat` | Forget the current conversation |
 | `clear fired`, `clean up` | Remove one-off reminders that have already fired |
+| `think on`, `thinking on` | Turn on thinking mode (see below) |
+| `think off`, `thinking off` | Turn off thinking mode |
+
+### Thinking mode
+
+Click **🧠 Think** next to the Send button (or say/type `think on`) and Loki reasons step by step before answering. It's much better at logic puzzles, multi-step math word problems, probability and "why" questions — but slower: expect roughly 10–45 seconds per reply instead of a few seconds. The status line says "Loki is reasoning…" while it works.
+
+- **Sticky:** it stays on until you click the button again (or say `think off`). It resets to off when Loki restarts.
+- **Only for chat and PDF questions.** Reminders, app launching, web search, system info, calculus, LaTeX conversion and the command router always run without thinking, so they stay fast.
+- **See how it got there:** each answer has a collapsed **Show reasoning** section above it. Click to expand. The reasoning is saved with the chat history but never fed back to the model.
 
 ### Reminders
 
@@ -320,6 +330,8 @@ Results show as a rendered equation — e.g. ∫ x² dx = x³/3 + C — with the
 
 A bare `e` means Euler's number (`integrate e^x`, `integrate 1/x from 1 to e`), and `pi` means π.
 
+Exact answers that aren't plain fractions also show a decimal value, e.g. `integrate 1/(1+x^2) from 0 to 1` gives π/4 ≈ 0.785398163397. Some functions (like the Gamma function) have no closed-form antiderivative at all — for those, a definite integral is computed numerically (`integrate gamma(x) from 1 to e` ≈ 1.80936766704), and an indefinite one tells you to add bounds.
+
 ### Chat window
 
 In tray mode, left-click the tray icon to open the chat window. Features:
@@ -354,12 +366,12 @@ LokiAIAssistant/
 ├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
 ├── symbolic_math.py        # Symbolic calculus with SymPy
 ├── discover_apps.py        # Scans system for installed apps
-├── setup_web_assets.py     # Re-downloads KaTeX + marked into web/vendor/ (rarely needed)
+├── setup_web_assets.py     # Re-downloads KaTeX, marked and fonts into web/vendor/ (rarely needed)
 ├── web/
 │   ├── chat.html           # The chat page shown inside the window
 │   ├── chat.css            # Chat colors, fonts, spacing (edit to restyle)
 │   ├── chat.js             # Markdown + math rendering, copy buttons
-│   └── vendor/             # Bundled KaTeX and marked (offline)
+│   └── vendor/             # Bundled KaTeX, marked and Google Sans fonts (offline)
 ├── manual_apps.json        # Manual app overrides (optional)
 ├── latex_preferences.md    # LaTeX style preferences (optional)
 ├── apps.json               # Generated app registry (auto-created)
@@ -490,6 +502,10 @@ The discovery script can't perfectly detect every installer's quirks. Add the ap
 ```
 
 Some apps need to launch with admin rights (RustDesk's GUI, for instance). Add `"elevated": true` to the entry.
+
+### Thinking-mode answers get cut off or seem to forget the PDF
+
+Reasoning takes up room in the model's context window. If answers stop mid-way with thinking mode on — especially for PDF questions — raise Ollama's context length: set the environment variable `OLLAMA_CONTEXT_LENGTH` to `8192` (or `16384` if you have VRAM to spare) and restart Ollama. `ollama ps` shows the current context size.
 
 ### LLM responses are very slow
 

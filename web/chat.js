@@ -14,7 +14,8 @@
 
   // ---------- Math ----------
   // Display:  $$...$$   \[...\]      Inline:  \(...\)   $...$
-  const MATH_RE = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|\$(?!\$)([^$\n]+?)\$/g;
+  // An escaped \$ is a literal dollar sign, never a delimiter — hence (?<!\\)
+  const MATH_RE = /(?<!\\)\$\$([\s\S]+?)(?<!\\)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<!\\)\$(?!\$)([^$\n]+?)(?<!\\)\$/g;
   // Fenced and inline code are left alone (a $ inside code is not math)
   const CODE_SPLIT_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]+`)/g;
   const PLACEHOLDER_RE = /@@KTX(\d+)@@/g;
@@ -127,7 +128,23 @@
   // ---------- Messages ----------
   const LABELS = { user: "you:", assistant: "assistant:", system: "·:" };
 
-  root.addMessage = function (role, text) {
+  // Thinking-mode reasoning: a collapsed "Show reasoning" section
+  function reasoningBlock(reasoning) {
+    const details = document.createElement("details");
+    details.className = "reasoning";
+    const summary = document.createElement("summary");
+    summary.textContent = "Show reasoning";
+    const inner = document.createElement("div");
+    inner.className = "reasoning-body";
+    inner.innerHTML = renderMarkdown(reasoning);
+    details.append(summary, inner);
+    details.addEventListener("toggle", () => {
+      summary.textContent = details.open ? "Hide reasoning" : "Show reasoning";
+    });
+    return details;
+  }
+
+  root.addMessage = function (role, text, reasoning) {
     const wrap = document.createElement("div");
     wrap.className = "msg " + role;
 
@@ -140,7 +157,9 @@
     if (role === "assistant") body.innerHTML = renderMarkdown(text);
     else body.textContent = text;   // user/system text shown as typed
 
-    wrap.append(label, body);
+    wrap.append(label);
+    if (role === "assistant" && reasoning) wrap.append(reasoningBlock(reasoning));
+    wrap.append(body);
     document.getElementById("messages").appendChild(wrap);
     // Wait a frame so the new message (and its math) has its final height
     requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight));
@@ -172,6 +191,11 @@
     const frag = r.cloneContents();
     if (!frag.querySelector(".math")) return null;    // no math: normal copy
 
+    // Collapsed reasoning isn't copied; expanded reasoning is (minus its toggle)
+    frag.querySelectorAll("details.reasoning").forEach((d) => {
+      if (!d.hasAttribute("open")) d.remove();
+      else d.querySelectorAll("summary").forEach((s) => s.remove());
+    });
     frag.querySelectorAll(".math").forEach((m) => {
       const tex = m.getAttribute("data-tex");
       if (m.getAttribute("data-display") === "1") {

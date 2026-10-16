@@ -46,7 +46,7 @@ def _load_ui_font():
 # ---------------------------------------------------------------------------
 class ChatBridge(QObject):
     user_said = Signal(str)
-    assistant_said = Signal(str)
+    assistant_said = Signal(str, str)   # answer, reasoning ("" unless thinking mode)
     system_message = Signal(str)
     show_window_requested = Signal()
     quit_requested = Signal()
@@ -54,6 +54,7 @@ class ChatBridge(QObject):
     thinking_stopped = Signal()
     pdf_attached = Signal(str)          # filename, or "" when detached
     reminder_fired = Signal(str, str)   # title, body
+    thinking_mode_changed = Signal(bool)   # "think on/off" typed or spoken — sync the button
 
 
 # ---------------------------------------------------------------------------
@@ -199,15 +200,14 @@ class ReminderPopup(QWidget):
 # "Loki is thinking..." indicator in the status line
 # ---------------------------------------------------------------------------
 class Throbber:
-    FRAMES = ["Loki is thinking", "Loki is thinking.",
-              "Loki is thinking..", "Loki is thinking..."]
-
-    def __init__(self, status_label, idle_text):
+    def __init__(self, status_label, idle_text, busy_text):
         self.status_label = status_label
         self.idle_text = idle_text          # function returning the resting text
+        self.busy_text = busy_text          # function: "Loki is thinking" / "...reasoning"
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
         self.frame = 0
+        self.base = ""
 
     @property
     def running(self):
@@ -215,7 +215,8 @@ class Throbber:
 
     def start(self):
         self.frame = 0
-        self.status_label.setText(self.FRAMES[0])
+        self.base = self.busy_text()
+        self.status_label.setText(self.base)
         self.timer.start(400)
 
     def stop(self):
@@ -223,8 +224,8 @@ class Throbber:
         self.status_label.setText(self.idle_text())
 
     def _tick(self):
-        self.frame = (self.frame + 1) % len(self.FRAMES)
-        self.status_label.setText(self.FRAMES[self.frame])
+        self.frame = (self.frame + 1) % 4
+        self.status_label.setText(self.base + "." * self.frame)
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +265,7 @@ class ChatPage(QWebEnginePage):
 # ---------------------------------------------------------------------------
 class ChatWindow(QMainWindow):
     submit_requested = Signal(str)   # user typed something and pressed Enter
+    thinking_toggled = Signal(bool)  # user clicked the 🧠 Think button
 
     def __init__(self, bridge):
         super().__init__()
@@ -325,6 +327,34 @@ class ChatWindow(QMainWindow):
         self.input_box.returnPressed.connect(self._on_submit)
         input_row.addWidget(self.input_box)
 
+        # Thinking-mode toggle. Sticky: stays on until clicked again.
+        self.think_button = QPushButton("✦ Think")
+        self.think_button.setCheckable(True)
+        self.think_button.setCursor(Qt.PointingHandCursor)
+        self.think_button.setToolTip(
+            "Thinking mode: reason step by step before answering.\n"
+            "Better for logic, math and tricky questions, but much slower.\n"
+            "Only affects chat and PDF questions."
+        )
+        self.think_button.setStyleSheet("""
+            QPushButton {
+                background-color: #1E1F20;
+                color: #9aa0a6;
+                border: 1px solid #2a2a2e;
+                border-radius: 4px;
+                padding: 8px 12px;
+            }
+            QPushButton:hover { border-color: #534AB7; color: #E3E3E3; }
+            QPushButton:checked {
+                background-color: #534AB7;
+                color: #ffffff;
+                border-color: #534AB7;
+            }
+            QPushButton:checked:hover { background-color: #6359C9; }
+        """)
+        self.think_button.toggled.connect(self.thinking_toggled.emit)
+        input_row.addWidget(self.think_button)
+
         self.send_button = QPushButton("Send")
         self.send_button.setStyleSheet("""
             QPushButton {
@@ -349,7 +379,12 @@ class ChatWindow(QMainWindow):
         )
         self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)   # one line, never grows
         layout.addWidget(self.status)
-        self.throbber = Throbber(self.status, lambda: self._idle_status)
+        self.throbber = Throbber(
+            self.status,
+            idle_text=lambda: self._idle_status,
+            busy_text=lambda: ("Loki is reasoning" if self.think_button.isChecked()
+                               else "Loki is thinking"),
+        )
 
         # --- Bridge signals ---
         bridge.user_said.connect(self._append_user)
@@ -358,6 +393,7 @@ class ChatWindow(QMainWindow):
         bridge.thinking_started.connect(self.throbber.start)
         bridge.thinking_stopped.connect(self.throbber.stop)
         bridge.pdf_attached.connect(lambda f: self.set_pdf_status(f or None))
+        bridge.thinking_mode_changed.connect(self._sync_think_button)
 
         # A PDF may already be attached if the window was rebuilt
         try:
@@ -396,18 +432,25 @@ class ChatWindow(QMainWindow):
             self.page.runJavaScript(code)
         self._pending_js.clear()
 
-    def _add_message(self, role, text):
+    def _add_message(self, role, text, reasoning=""):
         # json.dumps turns any Python string into a safe JavaScript string literal
-        self._run_js(f"addMessage({json.dumps(role)}, {json.dumps(text)});")
+        self._run_js(f"addMessage({json.dumps(role)}, {json.dumps(text)}, "
+                     f"{json.dumps(reasoning)});")
 
     # ---- Message slots (called via bridge signals, on the GUI thread) ----
     def _append_user(self, text):
         self._add_message("user", text)
         self._save_to_disk("user", text)
 
-    def _append_assistant(self, text):
-        self._add_message("assistant", text)
-        self._save_to_disk("assistant", text)
+    def _append_assistant(self, text, reasoning=""):
+        self._add_message("assistant", text, reasoning)
+        self._save_to_disk("assistant", text, reasoning)
+
+    def _sync_think_button(self, on):
+        """Reflect a typed/spoken "think on/off" without re-announcing it."""
+        self.think_button.blockSignals(True)
+        self.think_button.setChecked(on)
+        self.think_button.blockSignals(False)
 
     def _append_system(self, text):
         self._add_message("system", text)
@@ -457,9 +500,11 @@ class ChatWindow(QMainWindow):
         self.submit_requested.emit(f"read {path}")
 
     # ---- Persistence ----
-    def _save_to_disk(self, role, text):
+    def _save_to_disk(self, role, text, reasoning=""):
         """Append one message to the JSONL history file; trim when too long."""
         record = {"ts": datetime.now().isoformat(), "role": role, "text": text}
+        if reasoning:
+            record["reasoning"] = reasoning
         try:
             with open(HISTORY_FILE, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
@@ -486,6 +531,7 @@ class ChatWindow(QMainWindow):
             for line in lines:
                 rec = json.loads(line)
                 if rec.get("role") in ("user", "assistant"):
-                    self._add_message(rec["role"], rec.get("text", ""))
+                    self._add_message(rec["role"], rec.get("text", ""),
+                                      rec.get("reasoning", ""))
         except Exception as e:
             print(f"(history read failed: {e})")
