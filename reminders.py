@@ -1,8 +1,16 @@
-"""Background scheduler + Windows toast notifications."""
+"""Background scheduler for reminders.
+
+When a reminder fires, this module plays a sound and calls the display
+callback the assistant registered (in tray mode: the popup window). It never
+imports assistant.py — the assistant hands it what it needs.
+"""
 import atexit
-from datetime import datetime, timedelta
+from datetime import datetime
+
 from apscheduler.schedulers.background import BackgroundScheduler
+from dateutil.relativedelta import relativedelta
 import winsound
+
 import db
 
 
@@ -69,18 +77,18 @@ def _fire(reminder_id):
         _schedule_one(reminder_id, next_fire)
 
 
+_STEP = {
+    "yearly":  relativedelta(years=1),    # Feb 29 → Feb 28 in non-leap years
+    "monthly": relativedelta(months=1),   # Jan 31 → Feb 28/29, same day otherwise
+    "weekly":  relativedelta(weeks=1),
+    "daily":   relativedelta(days=1),
+}
+
+
 def _next_occurrence(current_fire_at, kind):
     """Compute the next time a recurring reminder should fire."""
-    if kind == "yearly":
-        return current_fire_at.replace(year=current_fire_at.year + 1)
-    if kind == "monthly":
-        # naive: add 30 days. Good enough for most cases.
-        return current_fire_at + timedelta(days=30)
-    if kind == "weekly":
-        return current_fire_at + timedelta(weeks=1)
-    if kind == "daily":
-        return current_fire_at + timedelta(days=1)
-    return current_fire_at
+    step = _STEP.get(kind)
+    return current_fire_at + step if step else current_fire_at
 
 
 def _schedule_one(reminder_id, fire_at):

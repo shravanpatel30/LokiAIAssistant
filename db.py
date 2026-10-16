@@ -1,6 +1,6 @@
 """SQLite wrapper for reminders, birthdays, and anniversaries."""
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_FILE = Path(__file__).parent / "assistant.db"
@@ -42,7 +42,6 @@ def add_reminder(text, fire_at, kind="once"):
 
 def list_pending(include_recent=True, recent_hours=24):
     """Returns upcoming reminders + recently-fired one-offs (last N hours)."""
-    from datetime import datetime, timedelta
     cutoff = (datetime.now() - timedelta(hours=recent_hours)).isoformat()
     with get_conn() as conn:
         if include_recent:

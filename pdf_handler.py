@@ -11,8 +11,7 @@ _attached = {
     "pages": 0,
 }
 
-# Token estimate: ~4 chars per token is a rough but reasonable heuristic
-# qwen3:8b has 32K context; keep document under ~16K tokens for quality
+# Rough token estimate (~4 characters per token), shown to the user on attach
 CHARS_PER_TOKEN = 4
 
 
@@ -34,15 +33,20 @@ def extract_text(pdf_path):
 
 
 def attach(pdf_path):
+    """Extract, index, and attach a PDF. Raises on any failure, in which case
+    the previously attached PDF (if any) is left as it was."""
     text, page_count = extract_text(pdf_path)
+    if not text.strip():
+        raise ValueError("No text found in that PDF — it may be a scanned image.")
 
-    # No truncation needed anymore — RAG handles long docs
-    _attached["path"] = str(Path(pdf_path).resolve())
+    # Build the retrieval index BEFORE marking the PDF attached, so a failure
+    # here (e.g. embedding model missing) doesn't leave a half-attached PDF.
+    # No truncation needed — retrieval handles long documents.
+    num_chunks = pdf_rag.index_document(text)
+
+    _attached["path"] = str(Path(pdf_path).expanduser().resolve())
     _attached["text"] = text
     _attached["pages"] = page_count
-
-    # Build the retrieval index
-    num_chunks = pdf_rag.index_document(text)
 
     estimated_tokens = len(text) // CHARS_PER_TOKEN
     return {

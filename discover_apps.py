@@ -14,7 +14,9 @@ import subprocess
 import winreg
 from pathlib import Path
 
-OUTPUT_FILE = "apps.json"
+# Next to this script — where assistant.py looks for it — no matter which
+# folder you run this from
+OUTPUT_FILE = Path(__file__).parent / "apps.json"
 
 START_MENU_DIRS = [
     Path(os.environ["PROGRAMDATA"]) / "Microsoft/Windows/Start Menu/Programs",

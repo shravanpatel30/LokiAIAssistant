@@ -1,8 +1,7 @@
 """Voice input (Whisper) and output (Piper) for the assistant."""
 import io
-import wave
 import threading
-import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -21,11 +20,38 @@ SAMPLE_RATE = 16000  # Whisper expects 16kHz
 CHANNELS = 1
 
 
-# ---- Models loaded once ----
-print("Loading Whisper...")
-_whisper = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE, compute_type=WHISPER_COMPUTE_TYPE)
-print(f"Loading Piper voice: {PIPER_VOICE_PATH.name}")
-_piper = PiperVoice.load(str(PIPER_VOICE_PATH))
+# ---- Models: loaded on first use (or by preload()), not at import ----
+# Loading takes several seconds, so text mode — which never uses voice —
+# shouldn't pay for it, and the tray window shouldn't wait for it.
+_whisper = None
+_piper = None
+_load_lock = threading.Lock()
+
+
+def _get_whisper():
+    global _whisper
+    with _load_lock:
+        if _whisper is None:
+            print("Loading Whisper...", flush=True)
+            _whisper = WhisperModel(WHISPER_MODEL_SIZE, device=WHISPER_DEVICE,
+                                    compute_type=WHISPER_COMPUTE_TYPE)
+    return _whisper
+
+
+def _get_piper():
+    global _piper
+    with _load_lock:
+        if _piper is None:
+            print(f"Loading Piper voice: {PIPER_VOICE_PATH.name}", flush=True)
+            _piper = PiperVoice.load(str(PIPER_VOICE_PATH))
+    return _piper
+
+
+def preload():
+    """Load both models now. Call from a background thread at startup so the
+    first F9 press is fast."""
+    _get_whisper()
+    _get_piper()
 
 
 # ---- Speech to text ----
@@ -65,7 +91,7 @@ def transcribe(audio_array):
     """Run Whisper on a numpy float32 audio array. Returns text."""
     if audio_array is None or len(audio_array) < SAMPLE_RATE * 0.3:
         return ""  # too short — under 0.3s is almost certainly no speech
-    segments, _ = _whisper.transcribe(audio_array, language="en", beam_size=5)
+    segments, _ = _get_whisper().transcribe(audio_array, language="en", beam_size=5)
     return " ".join(seg.text.strip() for seg in segments).strip()
 
 def speak(text):
@@ -75,7 +101,7 @@ def speak(text):
     try:
         buffer = io.BytesIO()
         with wave.open(buffer, "wb") as wav:
-            _piper.synthesize_wav(text, wav)
+            _get_piper().synthesize_wav(text, wav)
 
         buffer.seek(0)
         with wave.open(buffer, "rb") as wav:

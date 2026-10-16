@@ -24,7 +24,6 @@ import threading
 import time
 import traceback
 import webbrowser
-import psutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +32,8 @@ from urllib.parse import quote_plus
 
 import dateparser
 import keyboard
+from dateutil.relativedelta import relativedelta
+import psutil
 import requests
 from PySide6.QtWidgets import QApplication
 from simpleeval import simple_eval
@@ -479,7 +480,7 @@ def add_recurring(text, when_str, kind):
     if not fire_at:
         return False, f"Couldn't understand '{when_str}'."
     if fire_at <= datetime.now() and kind == "yearly":
-        fire_at = fire_at.replace(year=datetime.now().year + 1)
+        fire_at += relativedelta(years=1)    # safe for Feb 29
     text = text.strip() or "(unspecified)"
     rid = reminders.add_and_schedule(text, fire_at, kind=kind)
     return True, (f"✓ Recurring ({kind}) #{rid} set for "
@@ -539,7 +540,9 @@ def clear_fired_reminders():
 # ============================================================================
 def attach_pdf(path):
     """Load a PDF for Q&A. Returns a message."""
-    if not path or not path.lower().endswith(".pdf"):
+    # Explorer's "Copy as path" wraps the path in quotes
+    path = (path or "").strip().strip('"\'')
+    if not path.lower().endswith(".pdf"):
         return ("To attach a PDF, give me the full file path ending in .pdf. "
                 "Or drag a PDF onto the window.")
     try:
@@ -762,7 +765,10 @@ def _on_to_latex(p, _text):
     latex, error = convert_to_latex(p.get("text", ""), p.get("mode", "display"))
     if error:
         return Reply(error)
-    return Reply(f"```latex\n{latex}\n```", kind="assistant", speak="Converted to LaTeX.")
+    # The model wraps its output in \[...\] or \(...\), so the first line
+    # renders as math; the code block below it has the Copy button.
+    return Reply(f"{latex}\n\n```latex\n{latex}\n```", kind="assistant",
+                 speak="Converted to LaTeX.")
 
 
 def _on_system_info(_p, text):
@@ -920,6 +926,7 @@ def handle_voice(user_text):
 def voice_mode():
     """Push-to-talk: hold the hotkey to record, release to transcribe and run."""
     reminders.start()
+    voice.preload()
     recorder = voice.Recorder()
     print(f"\nVoice mode: hold {VOICE_HOTKEY.upper()} to talk. Release to send.")
     print("Say 'voice off' to disable speech output.\n")
@@ -1017,7 +1024,9 @@ def _voice_loop_for_tray(running):
 def tray_mode():
     global _window_bridge
     acquire_lock()
-    reminders.start()
+
+    # Load the voice models in the background so the window appears right away
+    threading.Thread(target=voice.preload, daemon=True).start()
 
     qt_app = QApplication.instance() or QApplication([])
     qt_app.setQuitOnLastWindowClosed(False)
@@ -1058,6 +1067,10 @@ def tray_mode():
 
     bridge.reminder_fired.connect(show_reminder_popup)
 
+    # Start the scheduler only now that popups are wired up — reminders missed
+    # while the PC was off fire during start() and need somewhere to go.
+    reminders.start()
+
     # Typed messages: show immediately, handle on a worker thread so the
     # window stays responsive while the LLM works
     def on_submit(text):
@@ -1091,10 +1104,11 @@ def tray_mode():
     qt_app.exec()          # blocks until quit
     running["alive"] = False
     voice_thread.join(timeout=1.0)
+    tray.stop()            # remove the icon (also needed when quitting via "exit")
 
-    # Leftover background threads (tray icon, scheduler, web engine) can keep
-    # Python alive after the window closes. Release the lock and exit for
-    # real so restarting Loki always works.
+    # Leftover background threads (scheduler, web engine) can keep Python
+    # alive after the window closes. Release the lock and exit for real so
+    # restarting Loki always works.
     release_lock()
     sys.stdout.flush()
     os._exit(0)
