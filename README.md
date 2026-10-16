@@ -12,8 +12,9 @@ Loki is a desktop AI assistant that runs entirely on your own machine. No cloud 
 - Live quietly in your system tray, available whenever you press the hotkey
 - Read PDFs and answer questions about them, with local semantic search (RAG)
 - Convert text and equations to LaTeX
+- Do exact symbolic calculus (integrals and derivatives) with SymPy
 - Search the web — Google Maps, YouTube, Wikipedia, Google, Amazon, GitHub, and more — by voice or text
-- A chat window with rendered markdown, code blocks with copy buttons, and drag-and-drop PDF support
+- A chat window with rendered markdown, properly typeset math (KaTeX), code blocks with copy buttons, and drag-and-drop PDF support
 
 Built for Windows. The LLM, speech recognition, and text-to-speech all run locally.
 
@@ -52,8 +53,8 @@ Both run locally through Ollama. Pull both during setup.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/loki.git
-cd loki
+git clone https://github.com/shravanpatel30/LokiAIAssistant.git
+cd LokiAIAssistant
 ```
 
 ### 2. Install Python dependencies
@@ -62,7 +63,7 @@ cd loki
 pip install -r requirements.txt
 ```
 
-This installs ~15 packages and takes a few minutes.
+This installs ~15 packages and takes a few minutes. PySide6 is the largest — it includes the embedded browser engine the chat window uses to render markdown and math.
 
 If you have an NVIDIA GPU and want Whisper to run on it (faster transcription), additionally install:
 
@@ -113,7 +114,17 @@ Output goes to `apps.json` (one entry per app). Re-run this script anytime you i
 
 If specific apps don't appear or need special launch options (like RustDesk's working directory), edit `manual_apps.json` — entries here override anything in `apps.json`.
 
-### 6. Set environment variables (recommended)
+### 6. Chat window libraries (already included)
+
+The chat window renders markdown with [marked](https://marked.js.org) and math with [KaTeX](https://katex.org). Both are bundled in `web/vendor/`, so the window works fully offline and there's nothing to do here.
+
+If `web/vendor/` is ever missing (the chat window will tell you), re-download them once with:
+
+```bash
+python setup_web_assets.py
+```
+
+### 7. Set environment variables (recommended)
 
 For best performance, set these in your Windows environment variables (System Properties → Advanced → Environment Variables):
 
@@ -144,7 +155,7 @@ Opens a REPL in your terminal. Type commands, see responses inline. Best for ver
 python assistant.py --voice
 ```
 
-Hold **F9** to speak, release to send. Responses are spoken aloud through your default audio device. Type `exit` or close the terminal to quit.
+Hold **F9** to speak, release to send. Replies print in the terminal; say "voice on" to also have them spoken aloud through your default audio device. Say "exit" or press `Ctrl+C` to quit.
 
 ### Tray mode (recommended for daily use)
 
@@ -152,7 +163,9 @@ Hold **F9** to speak, release to send. Responses are spoken aloud through your d
 python assistant.py --tray
 ```
 
-Loki runs silently in your system tray. Left-click the tray icon to open the chat window. F9 still works for push-to-talk from anywhere. Right-click the tray icon and choose Quit to exit cleanly.
+Loki runs silently in your system tray. Left-click the tray icon to open the chat window. F9 still works for push-to-talk from anywhere. Right-click the tray icon and choose Quit (or type `exit` in the chat window) to exit cleanly.
+
+The voice models load in the background at startup, so the window is usable right away — the very first F9 press may take a few extra seconds if they haven't finished loading.
 
 For fully silent operation with no console window, run with `pythonw.exe` instead of `python.exe`:
 
@@ -207,12 +220,17 @@ These work in any mode and don't go through the LLM:
 | `voice off`, `stop talking`, `be quiet` | Disable spoken replies |
 | `voice on`, `speak again` | Re-enable spoken replies |
 | `reset`, `clear`, `new chat` | Forget the current conversation |
+| `clear fired`, `clean up` | Remove one-off reminders that have already fired |
 
 ### Reminders
 
-Reminders persist in `assistant.db` (a SQLite file in the project folder). They survive restarts. If Loki was off when a reminder was due, it fires when you next launch.
+Reminders persist in `assistant.db` (a SQLite file in the project folder). They survive restarts. If Loki was off when a reminder was due, it fires — popup included — when you next launch.
 
-Reminders show a custom-styled popup in the bottom-right of your primary monitor and stays on top until you dismiss it. A sound plays alongside.
+Reminders show a custom-styled popup in the bottom-right of your primary monitor that stays on top until you dismiss it. A sound plays alongside.
+
+Recurring reminders follow the calendar: monthly ones land on the same day each month (the 31st becomes the last day in shorter months), and a yearly Feb 29 reminder fires on Feb 28 in non-leap years.
+
+Spoken times are cleaned up automatically — Whisper often writes "nine twenty-seven p.m." as `9 27 pm` or `9.27 pm`, and Loki reads those as 9:27 PM.
 
 ### Web search
 
@@ -236,8 +254,10 @@ Supported services: google, maps, youtube, wikipedia, amazon, github, stackoverf
 
 Attach a PDF in the chat window two ways:
 
-- Type `read C:\path\to\paper.pdf`
+- Type `read C:\path\to\paper.pdf` (a path from Explorer's "Copy as path", quotes and all, works too)
 - Drag and drop a PDF file onto the chat window
+
+The status line under the input box shows which PDF is attached.
 
 Once attached, ask questions about it:
 
@@ -249,6 +269,8 @@ Loki uses local semantic search to find relevant sections, so it works on long d
 
 **Note:** PDF question-answering is a research aid, not an authoritative source. The local model can occasionally misread specific numbers or miss details, especially in dense technical papers. Always verify exact values against the original document.
 
+Scanned PDFs (images of pages, with no text layer) aren't supported — Loki will tell you if a PDF has no extractable text.
+
 ### Converting to LaTeX
 
 Paste text or describe an equation and ask Loki to convert it:
@@ -256,7 +278,7 @@ Paste text or describe an equation and ask Loki to convert it:
 - "convert to latex: the integral from 0 to infinity of x squared e to the minus x dx"
 - "latex this inline: alpha squared plus beta squared"
 
-The result appears in a code block with a copy button. Note: this works on text you paste or describe, not on equations extracted from PDFs (PDF text extraction garbles math notation).
+The result appears as a rendered equation, with the LaTeX source underneath in a code block with a Copy button. Note: this works on text you paste or describe, not on equations extracted from PDFs (PDF text extraction garbles math notation).
 
 You can customize the LaTeX style by creating a `latex_preferences.md` file in the project folder with your preferences (e.g. "use \dfrac instead of \frac").
 
@@ -292,36 +314,52 @@ Loki does exact symbolic math via SymPy:
 - `differentiate x^2 * sin(x)`
 - `diff x^3 at 2` (evaluates the derivative at a point)
 - `integrate \frac{1}{1+x^2}` (LaTeX input works too)
+- `integrate x squared plus sin x` (simple expressions in words are translated by the LLM first)
 
-Results are exact and come back as LaTeX you can copy into a paper. Unlike the chat model, SymPy's answers are mathematically guaranteed correct. Note that integrals without an elementary closed form return special functions (e.g. erf, Si) — that's correct, not an error.
+Results show as a rendered equation — e.g. ∫ x² dx = x³/3 + C — with the LaTeX source in a code block underneath, ready to copy into a paper. Unlike the chat model, SymPy's answers are mathematically guaranteed correct. Note that integrals without an elementary closed form return special functions (e.g. erf, Si) — that's correct, not an error.
+
+A bare `e` means Euler's number (`integrate e^x`, `integrate 1/x from 1 to e`), and `pi` means π.
 
 ### Chat window
 
 In tray mode, left-click the tray icon to open the chat window. Features:
 
-- Code blocks have a header bar with a Copy link — click to copy the code to clipboard
+- Replies render markdown — headings, lists, tables, bold, links
+- Math renders properly with KaTeX, both inline (`$...$`, `\(...\)`) and on its own line (`$$...$$`, `\[...\]`)
+- Code blocks have a header bar with a Copy button — click to copy the code to clipboard
+- Links in replies open in your normal browser
+- Select text and right-click → Copy (or `Ctrl+C`) to copy any part of the conversation
 - Type and press Enter to send (Send button works too)
-- Last 50 messages from disk are restored when you reopen the window
+- Drag a PDF onto the window to attach it
+- Last 50 messages from disk are restored (with math rendered) when you reopen the window
 - Close the window with X to hide it (Loki keeps running in tray)
 - Conversation history is saved to `chat_history.jsonl` (rolling last ~1000 messages)
+
+The conversation area is a small local web page (`web/chat.html`) shown inside the window. Nothing is loaded from the internet.
 
 ---
 
 ## Project structure
 
 ```text
-loki/
-├── assistant.py            # Main entry point, command dispatch
-├── chat_window.py          # PySide6 chat UI
+LokiAIAssistant/
+├── assistant.py            # Main entry point: routing, all features, the three run modes
+├── chat_window.py          # PySide6 chat window, reminder popup
 ├── tray.py                 # System tray icon
 ├── voice.py                # Whisper (STT) and Piper (TTS)
 ├── db.py                   # SQLite for reminders
-├── reminders.py            # Scheduler and custom-styled popup reminders
+├── reminders.py            # Reminder scheduler (fires the popup via assistant.py)
 ├── pdf_handler.py          # PDF text extraction and attachment state
 ├── pdf_rag.py              # Local embeddings and semantic retrieval
 ├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
-├── symbolic_math.py        # For performing symbolic math using sympy
+├── symbolic_math.py        # Symbolic calculus with SymPy
 ├── discover_apps.py        # Scans system for installed apps
+├── setup_web_assets.py     # Re-downloads KaTeX + marked into web/vendor/ (rarely needed)
+├── web/
+│   ├── chat.html           # The chat page shown inside the window
+│   ├── chat.css            # Chat colors, fonts, spacing (edit to restyle)
+│   ├── chat.js             # Markdown + math rendering, copy buttons
+│   └── vendor/             # Bundled KaTeX and marked (offline)
 ├── manual_apps.json        # Manual app overrides (optional)
 ├── latex_preferences.md    # LaTeX style preferences (optional)
 ├── apps.json               # Generated app registry (auto-created)
@@ -330,8 +368,21 @@ loki/
 ├── AI_Icon.png             # Tray and window icon
 ├── voices/                 # Piper voice files (you download these)
 ├── logs/                   # Daily log files in tray mode (auto-created)
+├── .gitattributes          # Line-ending rules (keeps web/vendor/ byte-exact)
 └── requirements.txt
-``` 
+```
+
+### How a message flows
+
+Every message — typed in the window, typed in the terminal, or spoken — goes through the same steps in `assistant.py`:
+
+1. **Utility commands** (`exit`, `reset`, `voice on`...) are handled directly
+2. **Pure arithmetic** goes to the local calculator
+3. **Calculus commands** (`integrate ...`, `diff ...`) go to SymPy
+4. **Everything else** goes to the LLM router, which picks an intent (open app, reminder, PDF, web search, chat...) and the matching handler does the work
+
+To add a feature, write a handler function and add one line to `INTENT_HANDLERS` (plus a rule in the router prompt).
+
 ---
 
 ## Customization
@@ -353,9 +404,13 @@ Download any voice from [huggingface.co/rhasspy/piper-voices](https://huggingfac
 
 In `assistant.py`, change `VOICE_HOTKEY = "f9"` to whatever you prefer. Examples: `"f12"`, `"pause"`, `"ctrl+shift+space"`.
 
-### Default voice output off
+### Spoken replies on by default
 
-If you'd rather Loki only speak when you ask it to, set `VOICE_OUTPUT = False` near the top of `assistant.py`. Re-enable per session with the "voice on" command.
+Voice output is off by default — replies are text only. To have Loki speak by default, set `VOICE_OUTPUT = True` near the top of `assistant.py`. You can also toggle it any time with the "voice on" / "voice off" commands or from the tray menu.
+
+### Change the chat window's look
+
+All colors, fonts and spacing are variables at the top of `web/chat.css` — for example `--bg` (background), `--label-user` (the "you:" color), `--code-radius` (set to `8px` for rounded code blocks), and `--font-size`. Edit, save, and restart Loki. No Python changes needed.
 
 ### Custom icon
 
@@ -388,13 +443,27 @@ Loki will still work on a midrange laptop with no dedicated GPU — just slower.
 
 ## Troubleshooting
 
-### "Already running, exiting"
+### "Already running (PID ...). Exiting."
 
-A previous instance is still running. Check your system tray for the Loki icon and right-click → Quit. If the tray icon isn't visible, open Task Manager, find `python.exe` or `pythonw.exe`, and end the process. Then delete `%TEMP%\loki.lock` if it persists.
+A previous instance is still running. Check your system tray for the Loki icon and right-click → Quit. If the tray icon isn't visible, open Task Manager → Details, find `python.exe` or `pythonw.exe` with that PID, and end it.
+
+Loki ignores leftover lock files from a crash automatically (it checks that the PID really is a Python process). If it still refuses to start, delete `%TEMP%\loki_assistant.lock`.
 
 ### Reminder popup doesn't appear
 
 The popup needs Loki running in tray mode (in text/voice mode, reminders fall back to printed text in the terminal).
+
+### Chat shows plain text instead of formatted replies and math
+
+The bundled libraries in `web/vendor/` are missing — the chat window shows a notice when this happens. Run `python setup_web_assets.py` once and restart Loki.
+
+### "Embedding failed ... Run: ollama pull nomic-embed-text"
+
+The PDF search model isn't installed. Run `ollama pull nomic-embed-text`, then attach the PDF again.
+
+### "Something went wrong: ..." in the chat
+
+Usually Ollama isn't running. Start it (open the Ollama app, or run `ollama serve`) and try again. The full error is in today's file in `logs/`.
 
 ### "Couldn't understand the time"
 
@@ -442,6 +511,12 @@ The only network connections Loki makes are:
 - To `localhost:11434` (Ollama) — never leaves your machine
 - The initial download of the model and Whisper model files from their respective servers (one-time)
 
+Two things involve the internet only when you ask for them:
+- **Web search** opens a search page in your browser — the same as typing the search yourself. Loki doesn't call any search API.
+- **`setup_web_assets.py`** downloads KaTeX and marked from the npm registry — only if you run it. Both are already bundled, so normally you never will.
+
+The chat window loads nothing from the internet; markdown and math are rendered by the bundled libraries.
+
 If you ever add the optional calendar integration (not included by default), that would change — Google Calendar or Outlook events would go through their servers. Currently no such integration exists in this codebase.
 
 ---
@@ -461,3 +536,7 @@ Loki is built on top of excellent open-source projects:
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for speech recognition
 - [Piper](https://github.com/rhasspy/piper) for text-to-speech
 - [PySide6](https://wiki.qt.io/Qt_for_Python) for the GUI
+- [KaTeX](https://katex.org) for math rendering
+- [marked](https://marked.js.org) for markdown rendering
+- [SymPy](https://www.sympy.org) for symbolic calculus
+- [pdfplumber](https://github.com/jsvine/pdfplumber) for PDF text extraction
