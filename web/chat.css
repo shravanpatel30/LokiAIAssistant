@@ -14,9 +14,12 @@
   --border:         #2a2a2e;   /* tables, quotes */
   --code-radius:    0px;       /* try 8px for rounded code blocks */
 
-  --font:           "Segoe UI", system-ui, sans-serif;
-  --font-mono:      Consolas, "Cascadia Mono", monospace;
-  --font-size:      11pt;
+  /* Google Sans + Google Sans Code (bundled in web/vendor/fonts). Swap in any
+     installed font name here, e.g. "Segoe UI" or "Inter". Math always uses
+     KaTeX's own Computer Modern-style fonts. */
+  --font:           "Google Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono:      "Google Sans Code", Consolas, "Cascadia Mono", monospace;
+  --font-size:      12pt;
   --code-size:      10pt;
   --code-label:     9pt;
   --message-gap:    1.4em;     /* space between messages */

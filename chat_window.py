@@ -11,22 +11,34 @@ from pathlib import Path
 from PySide6.QtCore import (
     Qt, Signal, QObject, QTimer, QUrl, QPropertyAnimation, QEasingCurve,
 )
-from PySide6.QtGui import QFont, QIcon, QColor, QDesktopServices
+from PySide6.QtGui import QFont, QFontDatabase, QIcon, QColor, QDesktopServices
 from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QPushButton, QLabel, QFrame, QMenu,
+    QLineEdit, QPushButton, QLabel, QFrame, QMenu, QSizePolicy,
 )
 
 BASE_DIR = Path(__file__).parent
 CHAT_PAGE = BASE_DIR / "web" / "chat.html"
 KATEX_JS = BASE_DIR / "web" / "vendor" / "katex" / "katex.min.js"
+UI_FONT_FILE = BASE_DIR / "web" / "vendor" / "fonts" / "google-sans-latin-wght-normal.woff2"
 HISTORY_FILE = BASE_DIR / "chat_history.jsonl"
 ICON_FILE = BASE_DIR / "AI_Icon.png"
 
 WINDOW_HISTORY_LIMIT = 50   # messages shown when the window opens
 DISK_HISTORY_LIMIT = 1000   # most recent N messages kept on disk
+
+
+def _load_ui_font():
+    """Register the bundled Google Sans with Qt so the input box matches the
+    chat text. Returns the family name Qt knows it by (or Segoe UI)."""
+    if UI_FONT_FILE.exists():
+        font_id = QFontDatabase.addApplicationFont(str(UI_FONT_FILE))
+        families = QFontDatabase.applicationFontFamilies(font_id) if font_id >= 0 else []
+        if families:
+            return families[0]
+    return "Segoe UI"
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +304,10 @@ class ChatWindow(QMainWindow):
         self.view.customContextMenuRequested.connect(self._show_context_menu)
 
         self.view.load(home_url)
-        layout.addWidget(self.view)
+        layout.addWidget(self.view, 1)      # stretch=1: the chat takes all spare height
 
         # --- Input row ---
+        ui_font = _load_ui_font()   # Google Sans, same as the chat text
         input_row = QHBoxLayout()
         self.input_box = QLineEdit()
         self.input_box.setPlaceholderText("Type a message and press Enter...")
@@ -305,10 +318,10 @@ class ChatWindow(QMainWindow):
                 border: 1px solid #2a2a2e;
                 border-radius: 8px;
                 padding: 10px;
-                font-family: 'Segoe UI', sans-serif;
+                font-family: '%s', 'Segoe UI', sans-serif;
                 font-size: 11pt;
             }
-        """)
+        """ % ui_font)
         self.input_box.returnPressed.connect(self._on_submit)
         input_row.addWidget(self.input_box)
 
@@ -331,7 +344,10 @@ class ChatWindow(QMainWindow):
         # --- Status line ---
         self._idle_status = "Ready"
         self.status = QLabel(self._idle_status)
-        self.status.setStyleSheet("color: #6c7086; font-size: 9pt; padding: 4px;")
+        self.status.setStyleSheet(
+            "color: #6c7086; font-size: 9pt; padding: 4px; font-family: '%s', 'Segoe UI';" % ui_font
+        )
+        self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)   # one line, never grows
         layout.addWidget(self.status)
         self.throbber = Throbber(self.status, lambda: self._idle_status)
 

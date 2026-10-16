@@ -412,6 +412,8 @@ Voice output is off by default — replies are text only. To have Loki speak by 
 
 All colors, fonts and spacing are variables at the top of `web/chat.css` — for example `--bg` (background), `--label-user` (the "you:" color), `--code-radius` (set to `8px` for rounded code blocks), and `--font-size`. Edit, save, and restart Loki. No Python changes needed.
 
+The chat uses Google Sans for text and Google Sans Code for code (bundled in `web/vendor/fonts/`, so they work offline). To use a different font, put any installed font's name first in `--font` or `--font-mono`, e.g. `"Inter"` or `"Segoe UI"`. Math always uses KaTeX's own fonts.
+
 ### Custom icon
 
 Replace `AI_Icon.png` with your own 256×256 PNG (transparent background, high contrast for visibility at 16×16 in the tray).
@@ -537,6 +539,7 @@ Loki is built on top of excellent open-source projects:
 - [Piper](https://github.com/rhasspy/piper) for text-to-speech
 - [PySide6](https://wiki.qt.io/Qt_for_Python) for the GUI
 - [KaTeX](https://katex.org) for math rendering
+- [Google Sans and Google Sans Code](https://fonts.google.com) (SIL Open Font License, via [Fontsource](https://fontsource.org)) for the chat window's text and code
 - [marked](https://marked.js.org) for markdown rendering
 - [SymPy](https://www.sympy.org) for symbolic calculus
 - [pdfplumber](https://github.com/jsvine/pdfplumber) for PDF text extraction

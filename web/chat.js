@@ -19,14 +19,20 @@
   const CODE_SPLIT_RE = /(```[\s\S]*?(?:```|$)|`[^`\n]+`)/g;
   const PLACEHOLDER_RE = /@@KTX(\d+)@@/g;
 
+  // Each equation is wrapped in <span class="math" data-tex="..."> so the copy
+  // handler (bottom of this file) can put the LaTeX source on the clipboard.
   function renderMath(tex, display) {
+    tex = tex.trim();
+    let html;
     try {
-      return katex.renderToString(tex.trim(), {
+      html = katex.renderToString(tex, {
         displayMode: display, throwOnError: false, output: "html",
       });
     } catch (e) {
-      return escapeHtml(tex);
+      html = escapeHtml(tex);
     }
+    return '<span class="math" data-display="' + (display ? 1 : 0) +
+           '" data-tex="' + escapeHtml(tex) + '">' + html + "</span>";
   }
 
   // Render math to HTML *before* markdown runs, and swap it for placeholders.
@@ -144,6 +150,74 @@
     document.getElementById("messages").innerHTML = "";
     snippets.length = 0;
   };
+
+  // ---------- Copy as LaTeX ----------
+  // When a selection includes rendered math, the clipboard gets plain text
+  // with every equation as LaTeX ($...$ inline, $$...$$ on its own line).
+  // Only plain text is set, so every app — Overleaf, Word, a chat box —
+  // pastes the same LaTeX instead of the rendered symbols.
+  function closestMath(node) {
+    const el = node && (node.nodeType === 1 ? node : node.parentElement);
+    return el ? el.closest(".math") : null;
+  }
+
+  function selectionAsLatex(range) {
+    // Grow the selection to whole equations (selecting half of one counts)
+    const r = range.cloneRange();
+    const startMath = closestMath(r.startContainer);
+    const endMath = closestMath(r.endContainer);
+    if (startMath) r.setStartBefore(startMath);
+    if (endMath) r.setEndAfter(endMath);
+
+    const frag = r.cloneContents();
+    if (!frag.querySelector(".math")) return null;    // no math: normal copy
+
+    frag.querySelectorAll(".math").forEach((m) => {
+      const tex = m.getAttribute("data-tex");
+      if (m.getAttribute("data-display") === "1") {
+        const block = document.createElement("div");
+        block.textContent = "$$" + tex + "$$";
+        m.replaceWith(block);
+      } else {
+        m.replaceWith("$" + tex + "$");
+      }
+    });
+    // Code blocks paste as fenced code, without the "PYTHON 📋 Copy" header
+    frag.querySelectorAll(".code-block").forEach((cb) => {
+      const lang = (cb.querySelector(".code-lang") || {}).textContent || "";
+      const code = (cb.querySelector("pre") || cb).textContent.replace(/\n$/, "");
+      const block = document.createElement("p");
+      block.style.whiteSpace = "pre";
+      block.textContent = "```" + (lang === "CODE" ? "" : lang.toLowerCase()) + "\n" + code + "\n```";
+      cb.replaceWith(block);
+    });
+    frag.querySelectorAll("ol").forEach((ol) => {
+      const start = parseInt(ol.getAttribute("start") || "1", 10);
+      [...ol.children].forEach((li, i) => li.prepend(start + i + ". "));
+    });
+    frag.querySelectorAll("ul > li").forEach((li) => li.prepend("- "));
+
+    // innerText gives proper line breaks between paragraphs, list items, etc.,
+    // but only for elements that are on the page — so lay it out off-screen.
+    const box = document.createElement("div");
+    box.style.cssText = "position:fixed; left:-100000px; top:0; width:800px;";
+    box.appendChild(frag);
+    document.body.appendChild(box);
+    const text = box.innerText;
+    box.remove();
+    return text.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("copy", (event) => {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !event.clipboardData) return;
+      const text = selectionAsLatex(sel.getRangeAt(0));
+      if (text === null) return;
+      event.clipboardData.setData("text/plain", text);
+      event.preventDefault();
+    });
+  }
 
   root.renderMarkdown = renderMarkdown;   // handy for testing
 })();
