@@ -1,7 +1,7 @@
 // Loki chat renderer: markdown via marked, math via KaTeX. Fully offline.
 //
 // Python talks to this page through two functions:
-//   addMessage(role, text)   role = "user" | "assistant" | "system"
+//   addMessage(role, text, reasoning, images)   role = "user" | "assistant" | "system"
 //   clearMessages()
 (function () {
   const root = typeof window !== "undefined" ? window : globalThis;
@@ -128,23 +128,23 @@
   // ---------- Messages ----------
   const LABELS = { user: "you:", assistant: "assistant:", system: "·:" };
 
-  // Thinking-mode reasoning: a collapsed "Show reasoning" section
-  function reasoningBlock(reasoning) {
+  // Thinking-mode reasoning, collapsed above the answer
+  function collapsible(content, what) {
     const details = document.createElement("details");
     details.className = "reasoning";
     const summary = document.createElement("summary");
-    summary.textContent = "Show reasoning";
+    summary.textContent = "Show " + what;
     const inner = document.createElement("div");
     inner.className = "reasoning-body";
-    inner.innerHTML = renderMarkdown(reasoning);
+    inner.innerHTML = renderMarkdown(content);
     details.append(summary, inner);
     details.addEventListener("toggle", () => {
-      summary.textContent = details.open ? "Hide reasoning" : "Show reasoning";
+      summary.textContent = (details.open ? "Hide " : "Show ") + what;
     });
     return details;
   }
 
-  root.addMessage = function (role, text, reasoning) {
+  root.addMessage = function (role, text, reasoning, images) {
     const wrap = document.createElement("div");
     wrap.className = "msg " + role;
 
@@ -158,8 +158,23 @@
     else body.textContent = text;   // user/system text shown as typed
 
     wrap.append(label);
-    if (role === "assistant" && reasoning) wrap.append(reasoningBlock(reasoning));
+    if (role === "assistant" && reasoning) wrap.append(collapsible(reasoning, "reasoning"));
     wrap.append(body);
+    if (images && images.length) {            // thumbnails of attached images
+      const thumbs = document.createElement("div");
+      thumbs.className = "thumbs";
+      for (const url of images) {
+        const a = document.createElement("a");
+        a.href = url;                           // click: opens in your image viewer
+        a.title = "Open image";
+        const img = document.createElement("img");
+        img.src = url;
+        img.addEventListener("load", () => window.scrollTo(0, document.body.scrollHeight));
+        a.append(img);
+        thumbs.append(a);
+      }
+      wrap.append(thumbs);
+    }
     document.getElementById("messages").appendChild(wrap);
     // Wait a frame so the new message (and its math) has its final height
     requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight));

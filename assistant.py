@@ -12,6 +12,7 @@ Run:
     python assistant.py --tray    tray icon + chat window (normal use)
 """
 import atexit
+import base64
 import ctypes
 import json
 import math
@@ -40,6 +41,7 @@ from simpleeval import simple_eval
 
 import chat_window
 import db
+import models
 import pdf_handler
 import pdf_rag
 import reminders
@@ -61,8 +63,7 @@ MANUAL_APPS_FILE = BASE_DIR / "manual_apps.json"
 LATEX_PREFS_FILE = BASE_DIR / "latex_preferences.md"
 LOCKFILE = os.path.join(tempfile.gettempdir(), "loki_assistant.lock")
 
-ROUTER_MODEL = "qwen3:8b"
-CHAT_MODEL = "qwen3:8b"
+# Which models to use is chosen in the chat window (see models.py / settings.json)
 OLLAMA_URL = "http://localhost:11434/api/chat"
 
 VOICE_HOTKEY = "f9"     # press and hold to talk
@@ -75,7 +76,8 @@ LOKI_IDENTITY = """You are Loki, a local AI assistant running privately on the u
 Your features include: chat and Q&A, searching the web (Google, Maps, YouTube, Wikipedia,
 etc.), opening apps and websites, setting one-off and recurring reminders, reading PDFs and
 answering questions about them, converting text to LaTeX, exact symbolic calculus (integrate,
-differentiate), quick arithmetic, and system info queries (CPU, RAM, disk, battery, uptime).
+differentiate), quick arithmetic, system info queries (CPU, RAM, disk, battery, uptime),
+and understanding images the user pastes or drops into the chat (equations, plots, circuits, handwriting).
 When users ask what you can do, describe these specific capabilities."""
 
 # Set in tray_mode() so code running in background threads can post to the window
@@ -328,7 +330,7 @@ def classify_intent(user_text):
         r = requests.post(
             OLLAMA_URL,
             json={
-                "model": ROUTER_MODEL,
+                "model": models.main_model(),
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_text},
@@ -342,7 +344,7 @@ def classify_intent(user_text):
         )
         elapsed = time.perf_counter() - t_start
         content = r.json()["message"]["content"]
-        print(f"[DEBUG] {ROUTER_MODEL} routed in {elapsed*1000:.0f}ms → {content}")
+        print(f"[DEBUG] {models.main_model()} routed in {elapsed*1000:.0f}ms → {content}")
 
         parsed = json.loads(content)
         if parsed.get("intent") not in VALID_INTENTS:
@@ -370,11 +372,27 @@ def _remember(role, content):
         del chat_history[: len(chat_history) - MAX_HISTORY_TURNS * 2]
 
 
-def _build_chat_messages(message):
+IMAGE_RULES = """
+
+The user attached an image. When asked to type out, transcribe or convert what is in it,
+copy it exactly as written: don't correct, simplify or reword anything. Write math in
+LaTeX, $...$ inline and $$...$$ on its own line."""
+
+
+def _build_chat_messages(message, images=None):
     """Messages to send for one chat turn. Records the user message in history.
 
     With a PDF attached, the model gets the document excerpts (or the whole
-    document for summary requests) instead of the chat history."""
+    document for summary requests) instead of the chat history.
+    With images, they're attached to this turn only. The history keeps just
+    the text (question and answer), so a follow-up like "now simplify that"
+    works from the transcription."""
+    if images:
+        _remember("user", f"{message} [image attached]")
+        messages = [{"role": "system", "content": LOKI_IDENTITY + IMAGE_RULES}, *chat_history]
+        messages[-1] = dict(messages[-1], images=images)
+        return messages
+
     _remember("user", message)
 
     if not pdf_handler.is_attached():
@@ -404,22 +422,27 @@ def _strip_leading_junk(reply):
     return re.sub(r'^[\s\'",+\-•·\u0080-￿]{1,10}(?=[A-Z])', '', reply).strip()
 
 
-def chat(message, stream=False):
-    """Ask the chat model (general chat and PDF questions).
+def chat(message, stream=False, images=None):
+    """Ask the model a chat, PDF or image question.
 
     This is the ONLY call that follows the thinking-mode toggle; the router,
     LaTeX, system info and calculus calls always use think=False.
 
+    images: base64 images attached to this message. They go to image_model(),
+    which unloads right after if it isn't the main model, to free VRAM.
     With stream=True the answer is printed to the terminal as it arrives
     (text and voice modes). Returns (answer, reasoning) — reasoning is ""
     when thinking mode is off."""
-    thinking = THINKING
+    model = image_model() if images else models.main_model()
+    thinking = THINKING and models.can_think(model)
     payload = {
-        "model": CHAT_MODEL,
-        "messages": _build_chat_messages(message),
+        "model": model,
+        "messages": _build_chat_messages(message, images),
         "stream": stream,
         "think": thinking,
     }
+    if not models.same_model(model, models.main_model()):
+        payload["keep_alive"] = 0   # 8 GB VRAM can't hold both models
     # Reasoning can run for a minute or more before the answer starts
     timeout = 600 if thinking else 120
 
@@ -442,13 +465,74 @@ def chat(message, stream=False):
                     print()
                     break
     else:
-        r = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
-        msg = r.json()["message"]
+        data = requests.post(OLLAMA_URL, json=payload, timeout=timeout).json()
+        if "error" in data:            # e.g. model not installed
+            raise RuntimeError(f"{model}: {data['error']}")
+        msg = data["message"]
         answer, reasoning = msg.get("content", ""), msg.get("thinking") or ""
 
     answer = _strip_leading_junk(answer)
     _remember("assistant", answer)   # reasoning is never put back into the history
     return answer, reasoning.strip()
+
+
+# ============================================================================
+# Images: sent straight to a model that can see
+# ============================================================================
+IMAGE_EXTS = ("png", "jpg", "jpeg", "gif", "bmp", "webp")
+CHAT_IMAGES_DIR = BASE_DIR / "chat_images"     # copies of images sent in the window
+
+_IMAGE_PATH_RE = re.compile(
+    r'"([^"]+\.(?:' + "|".join(IMAGE_EXTS) + r'))"'                     # "C:\my pics\a.png"
+    r'|([A-Za-z]:[\\/][^"\n]*?\.(?:' + "|".join(IMAGE_EXTS) + r'))\b',  # C:\my pics\a.png
+    re.IGNORECASE,
+)
+
+
+def extract_image_paths(text):
+    """Find image files named in a typed message ("read C:\\pics\\circuit.png
+    what is I?"). Returns (paths that exist, the remaining question)."""
+    paths, rest = [], text
+    for m in _IMAGE_PATH_RE.finditer(text):
+        p = Path(m.group(1) or m.group(2))
+        if p.is_file():
+            paths.append(str(p))
+            rest = rest.replace(m.group(0), " ")
+    if not paths:
+        return [], text
+    rest = re.sub(r"^\s*(read|open|look at|see|check|analy[sz]e|load)\b[:\s]*", "", rest, flags=re.I)
+    return paths, rest.strip(" \t:,.-")
+
+
+def _b64(path):
+    return base64.b64encode(Path(path).read_bytes()).decode()
+
+
+DEFAULT_IMAGE_QUESTION = ("Type out everything written in this image, with equations in LaTeX. "
+                          "If there's a figure or diagram, describe it briefly.")
+
+
+def image_model():
+    """The main model if it can see images, otherwise the Images dropdown's model."""
+    main = models.main_model()
+    return main if models.can_see(main) else models.vision_model()
+
+
+def answer_about_images(question, image_paths, stream=False, on_status=None):
+    """Answer a question about attached images. Returns a Reply.
+
+    The image and question go straight to a model that can see (see
+    image_model). Sending nothing but the image asks for a transcription."""
+    model = image_model()
+    if not models.can_see(model):
+        return Reply(f"The image model '{model}' can't see images (or isn't installed). "
+                     f"Pick one marked 👁 in the Images dropdown, e.g. after "
+                     f"'ollama pull qwen3-vl:8b-instruct'.")
+    if on_status:
+        on_status(f"Loki is looking ({model})")
+    question = question.strip() or DEFAULT_IMAGE_QUESTION
+    answer, reasoning = chat(question, stream=stream, images=[_b64(p) for p in image_paths])
+    return Reply(answer, kind="assistant", streamed=stream, reasoning=reasoning)
 
 
 # ============================================================================
@@ -615,7 +699,7 @@ def convert_to_latex(text, mode="display"):
     r = requests.post(
         OLLAMA_URL,
         json={
-            "model": CHAT_MODEL,
+            "model": models.main_model(),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": f"{mode_instruction}\n\nConvert this to LaTeX:\n{text}"},
@@ -650,7 +734,7 @@ def answer_system_question(user_text):
     r = requests.post(
         OLLAMA_URL,
         json={
-            "model": CHAT_MODEL,
+            "model": models.main_model(),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_text},
@@ -815,9 +899,21 @@ INTENT_HANDLERS = {
 }
 
 
-def dispatch(user_text, stream=False):
+def dispatch(user_text, stream=False, images=None, on_status=None):
     """Do whatever the message asks and return a Reply.
-    stream=True prints chat replies to the terminal as they're generated."""
+    stream=True prints chat replies to the terminal as they're generated.
+    images: image file paths attached in the window (pasted or dropped).
+    on_status: callback for status-line text during slow steps."""
+    symbolic_math.CHAT_MODEL = models.main_model()   # its word → math translation
+
+    # 0. Images — attached in the window, or a path typed in the message
+    found, rest = extract_image_paths(user_text)
+    if images or found:
+        reply = answer_about_images(rest if found else user_text,
+                                    list(images or []) + found, stream, on_status)
+        reply.intent = "image"
+        return reply
+
     # 1. Pure arithmetic — instant, no LLM
     value = try_calculator(user_text)
     if value is not None:
@@ -919,7 +1015,7 @@ def handle_text(user_text):
 
 def text_mode():
     reminders.start()
-    print(f"Loaded {len(APPS)} apps. Router: {ROUTER_MODEL}, Chat: {CHAT_MODEL}\n")
+    print(f"Loaded {len(APPS)} apps. Model: {models.main_model()}, images: {models.vision_model()}\n")
     while True:
         try:
             user_input = input("you> ").strip()
@@ -992,13 +1088,14 @@ def voice_mode():
 # ============================================================================
 # Front end 3: tray + chat window  (python assistant.py --tray)
 # ============================================================================
-def handle_window(user_text):
-    """Runs on a worker thread. Talks to the window only through bridge signals."""
+def handle_window(user_text, images=None):
+    """Runs on a worker thread. Talks to the window only through bridge signals.
+    images: file paths of images pasted or dropped into the window."""
     bridge = _window_bridge
     if bridge is None:
         return
 
-    cmd = is_utility_command(user_text)
+    cmd = None if images else is_utility_command(user_text)
     if cmd == "exit":
         bridge.quit_requested.emit()
         return
@@ -1010,7 +1107,7 @@ def handle_window(user_text):
 
     bridge.thinking_started.emit()
     try:
-        reply = dispatch(user_text)
+        reply = dispatch(user_text, images=images, on_status=bridge.busy_text.emit)
     except Exception as e:
         reply = _error_reply(e)
     finally:
@@ -1048,7 +1145,7 @@ def _voice_loop_for_tray(running):
                 text = voice.transcribe(audio)
                 if text:
                     if _window_bridge:
-                        _window_bridge.user_said.emit(text)
+                        _window_bridge.user_said.emit(text, [])
                     handle_window(text)
                 continue
             time.sleep(0.05)
@@ -1109,11 +1206,19 @@ def tray_mode():
 
     # Typed messages: show immediately, handle on a worker thread so the
     # window stays responsive while the LLM works
-    def on_submit(text):
-        bridge.user_said.emit(text)
-        threading.Thread(target=handle_window, args=(text,), daemon=True).start()
+    def on_submit(text, images):
+        bridge.user_said.emit(text, images)
+        threading.Thread(target=handle_window, args=(text, images), daemon=True).start()
 
-    window.submit_requested.connect(on_submit)
+    window.submit_requested.connect(lambda text: on_submit(text, []))
+    window.images_submitted.connect(on_submit)
+
+    # Model dropdowns
+    def on_model_chosen(role, name):
+        models.set_setting(f"{role}_model", name)
+        label = "Model" if role == "main" else "Images"
+        bridge.system_message.emit(f"{label}: {name}")
+    window.model_chosen.connect(on_model_chosen)
 
     # The 🧠 button in the window turns thinking mode on/off
     window.thinking_toggled.connect(

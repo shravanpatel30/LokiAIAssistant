@@ -12,9 +12,10 @@ Loki is a desktop AI assistant that runs entirely on your own machine. No cloud 
 - Live quietly in your system tray, available whenever you press the hotkey
 - Read PDFs and answer questions about them, with local semantic search (RAG)
 - Convert text and equations to LaTeX
+- Understand images — paste a screenshot, a plot or a photo of handwritten work and ask about it
 - Do exact symbolic calculus (integrals and derivatives) with SymPy
 - Search the web — Google Maps, YouTube, Wikipedia, Google, Amazon, GitHub, and more — by voice or text
-- A chat window with rendered markdown, properly typeset math (KaTeX), code blocks with copy buttons, and drag-and-drop PDF support
+- A chat window with rendered markdown, properly typeset math (KaTeX), code blocks with copy buttons, and drag-and-drop PDF and image support, and dropdowns to pick which local models to use
 
 Built for Windows. The LLM, speech recognition, and text-to-speech all run locally.
 
@@ -42,9 +43,10 @@ These must be installed before setting up Loki:
 ### Models used
 
 - `qwen3:8b` — the main language model (routing + chat + PDF Q&A + LaTeX)
+- `qwen3-vl:8b-instruct` — the vision model, used only when you attach an image
 - `nomic-embed-text` — embedding model for PDF semantic search
 
-Both run locally through Ollama. Pull both during setup.
+All run locally through Ollama. Pull them during setup. You can switch models any time from the dropdowns in the chat window.
 
 ---
 
@@ -90,6 +92,14 @@ ollama pull nomic-embed-text
 ```
 
 This is small (~270 MB) and runs locally. Without it, PDF question-answering won't work.
+
+#### Pull the vision model (for images)
+
+```bash
+ollama pull qwen3-vl:8b-instruct
+```
+
+About 6 GB. Use the **instruct** tag: the plain `qwen3-vl:8b` is a thinking model that often runs out of room before it finishes answering. Without a vision model everything else still works; Loki just tells you it can't read images.
 
 ### 4. Download a Piper voice
 
@@ -226,10 +236,11 @@ These work in any mode and don't go through the LLM:
 
 ### Thinking mode
 
-Click **🧠 Think** next to the Send button (or say/type `think on`) and Loki reasons step by step before answering. It's much better at logic puzzles, multi-step math word problems, probability and "why" questions — but slower: expect roughly 10–45 seconds per reply instead of a few seconds. The status line says "Loki is reasoning…" while it works.
+Click **Think** next to the Send button (or say/type `think on`) and Loki reasons step by step before answering. It's much better at logic puzzles, multi-step math word problems, probability and "why" questions — but slower: expect roughly 10–45 seconds per reply instead of a few seconds. The status line says "Loki is reasoning…" while it works.
 
 - **Sticky:** it stays on until you click the button again (or say `think off`). It resets to off when Loki restarts.
-- **Only for chat and PDF questions.** Reminders, app launching, web search, system info, calculus, LaTeX conversion and the command router always run without thinking, so they stay fast.
+- **Only for chat and PDF questions** (and image questions, if the image model supports thinking — `qwen3-vl:8b-instruct` doesn't). Reminders, app launching, web search, system info, calculus, LaTeX conversion and the command router always run without thinking, so they stay fast.
+- **Greyed out?** The model picked in the **Model** dropdown doesn't support thinking. `qwen3:8b` does.
 - **See how it got there:** each answer has a collapsed **Show reasoning** section above it. Click to expand. The reasoning is saved with the chat history but never fed back to the model.
 
 ### Reminders
@@ -279,7 +290,34 @@ Loki uses local semantic search to find relevant sections, so it works on long d
 
 **Note:** PDF question-answering is a research aid, not an authoritative source. The local model can occasionally misread specific numbers or miss details, especially in dense technical papers. Always verify exact values against the original document.
 
-Scanned PDFs (images of pages, with no text layer) aren't supported — Loki will tell you if a PDF has no extractable text.
+Scanned PDFs (images of pages, with no text layer) aren't supported — Loki will tell you if a PDF has no extractable text. Screenshot the page and attach it as an image instead.
+
+### Working with images
+
+Attach an image (PNG, JPG, WebP, BMP or GIF) three ways:
+
+- **Paste:** copy a screenshot (`Win+Shift+S`) or an image file and press `Ctrl+V` in the input box
+- **Drag and drop** an image onto the chat window
+- **Type a path:** `C:\Users\you\Pictures\circuit.png what is the current I?` (Explorer's "Copy as path", quotes and all, works too)
+
+Pasted and dropped images show as chips above the input box. Click ✕ on a chip to remove it, add more if you like, type your question, and press Enter. Your images appear as thumbnails in the chat; click one to open it in your image viewer.
+
+**Sending an image with no question types out everything written in it**, with equations in LaTeX — handy for a screenshot from a paper or a page of handwritten notes. Equations render in the chat, and copying them (`Ctrl+C`) gives you the LaTeX source.
+
+Good uses:
+
+- "Convert this equation to LaTeX" (a screenshot from a paper)
+- "Type out these notes as markdown"
+- "Turn this table into markdown"
+- "What's the peak value in this plot?"
+
+The image and your question go straight to the model in the **Images** dropdown (`qwen3-vl:8b-instruct` by default). If the model in the **Model** dropdown can see images itself (marked 👁), it's used instead. Follow-ups work on the text of the answer — "now simplify that" or "write it in Python" — without re-attaching the image.
+
+8B vision models are very good at transcribing text and equations but unreliable at reasoning about diagrams: a hand-drawn circuit, for example, is often read with the wrong connections. Use them to type things out, and do the reasoning yourself (or with the main model on the transcribed text). Bigger vision models handle diagrams much better if you upgrade your GPU — pull one and pick it from the dropdown.
+
+The vision model and `qwen3:8b` don't fit in 8 GB of VRAM together, so the vision model unloads as soon as it's done. Each image takes a few extra seconds while it loads (the status line says "Loki is looking…").
+
+**Note:** like PDF answers, image answers are a research aid. Double-check numbers read off plots — small vision models estimate them, and can be off by a gridline.
 
 ### Converting to LaTeX
 
@@ -342,12 +380,22 @@ In tray mode, left-click the tray icon to open the chat window. Features:
 - Links in replies open in your normal browser
 - Select text and right-click → Copy (or `Ctrl+C`) to copy any part of the conversation
 - Type and press Enter to send (Send button works too)
-- Drag a PDF onto the window to attach it
+- Drag a PDF onto the window to attach it; paste (`Ctrl+V`) or drag an image to ask about it
+- **Model** and **Images** dropdowns at the top pick which installed Ollama models Loki uses (see below)
 - Last 50 messages from disk are restored (with math rendered) when you reopen the window
 - Close the window with X to hide it (Loki keeps running in tray)
 - Conversation history is saved to `chat_history.jsonl` (rolling last ~1000 messages)
 
 The conversation area is a small local web page (`web/chat.html`) shown inside the window. Nothing is loaded from the internet.
+
+### Choosing models
+
+The two dropdowns at the top of the chat window list every model you've pulled with Ollama (the list refreshes each time you open it, so a model you just pulled shows up right away):
+
+- **Model** — the main model. It routes your commands and answers chat, PDF and LaTeX questions.
+- **Images** — the model that reads attached images. Only models that can see images (marked 👁) are accepted here.
+
+Your choice is saved in `settings.json` and kept across restarts. To try a new model, run `ollama pull <model>` and pick it from the dropdown — no code changes needed.
 
 ---
 
@@ -365,6 +413,7 @@ LokiAIAssistant/
 ├── pdf_rag.py              # Local embeddings and semantic retrieval
 ├── system_info.py          # Local system statistics (CPU, RAM, disk, etc.)
 ├── symbolic_math.py        # Symbolic calculus with SymPy
+├── models.py               # Which models to use (settings.json) and what each one can do
 ├── discover_apps.py        # Scans system for installed apps
 ├── setup_web_assets.py     # Re-downloads KaTeX, marked and fonts into web/vendor/ (rarely needed)
 ├── web/
@@ -377,6 +426,9 @@ LokiAIAssistant/
 ├── apps.json               # Generated app registry (auto-created)
 ├── assistant.db            # Reminders database (auto-created)
 ├── chat_history.jsonl      # Conversation log (auto-created)
+├── settings.json           # Your model choices (auto-created)
+├── chat_images/            # Copies of images you've attached (auto-created)
+├── model_eval/             # Kit for comparing models on your kind of questions (see its README)
 ├── AI_Icon.png             # Tray and window icon
 ├── voices/                 # Piper voice files (you download these)
 ├── logs/                   # Daily log files in tray mode (auto-created)
@@ -389,9 +441,10 @@ LokiAIAssistant/
 Every message — typed in the window, typed in the terminal, or spoken — goes through the same steps in `assistant.py`:
 
 1. **Utility commands** (`exit`, `reset`, `voice on`...) are handled directly
-2. **Pure arithmetic** goes to the local calculator
-3. **Calculus commands** (`integrate ...`, `diff ...`) go to SymPy
-4. **Everything else** goes to the LLM router, which picks an intent (open app, reminder, PDF, web search, chat...) and the matching handler does the work
+2. **Attached images** go straight to the vision model (see *Working with images*)
+3. **Pure arithmetic** goes to the local calculator
+4. **Calculus commands** (`integrate ...`, `diff ...`) go to SymPy
+5. **Everything else** goes to the LLM router, which picks an intent (open app, reminder, PDF, web search, chat...) and the matching handler does the work
 
 To add a feature, write a handler function and add one line to `INTENT_HANDLERS` (plus a rule in the router prompt).
 
@@ -401,12 +454,14 @@ To add a feature, write a handler function and add one line to `INTENT_HANDLERS`
 
 ### Change the language model
 
-Edit `assistant.py` — find `ROUTER_MODEL` and `CHAT_MODEL`. Both default to `qwen3:8b`. You can use a smaller model on weaker hardware:
+Pick it from the **Model** dropdown in the chat window (see *Choosing models*). The defaults are `qwen3:8b` and, for images, `qwen3-vl:8b-instruct`. You can use a smaller model on weaker hardware:
 
 - `qwen2.5:7b` — slightly older, smaller, still good
-- `llama3.2:3b` — much smaller (~2 GB), runs fine on CPU, less capable at chat
+- `llama3.2:3b` — much smaller (~2 GB), runs fine on CPU, less capable at chat (no thinking mode)
 
-Run `ollama pull <model>` first to download it.
+Run `ollama pull <model>` first to download it. The choice is stored in `settings.json`; delete that file to go back to the defaults.
+
+To compare models on the kind of questions you actually ask — including image questions — use the kit in `model_eval/` (see `model_eval/README.md`).
 
 ### Change the voice
 
@@ -447,7 +502,8 @@ Then edit the copies with your own app paths and LaTeX style. Both files are opt
 
 If you don't have a GPU or have less than 8 GB VRAM:
 
-- **Use a smaller model**: `ollama pull qwen2.5:3b` and set `ROUTER_MODEL = "qwen2.5:3b"` and `CHAT_MODEL = "qwen2.5:3b"` in `assistant.py`
+- **Use a smaller model**: `ollama pull qwen2.5:3b` and pick it from the **Model** dropdown
+- **Use a smaller vision model**: e.g. `ollama pull qwen2.5vl:3b` and pick it from the **Images** dropdown
 - **Run Whisper on CPU**: in `voice.py`, set `WHISPER_DEVICE = "cpu"` and `WHISPER_COMPUTE_TYPE = "int8"`
 - **Use the smallest Whisper model**: in `voice.py`, set `WHISPER_MODEL_SIZE = "base.en"` (less accurate) or `"tiny.en"` (least accurate, fastest)
 
@@ -507,6 +563,18 @@ Some apps need to launch with admin rights (RustDesk's GUI, for instance). Add `
 
 Reasoning takes up room in the model's context window. If answers stop mid-way with thinking mode on — especially for PDF questions — raise Ollama's context length: set the environment variable `OLLAMA_CONTEXT_LENGTH` to `8192` (or `16384` if you have VRAM to spare) and restart Ollama. `ollama ps` shows the current context size.
 
+### "... can't see images — pick a model marked 👁"
+
+You picked a text-only model in the **Images** dropdown. Choose one marked 👁, or pull one: `ollama pull qwen3-vl:8b-instruct`. If no models show 👁 at all, Ollama may not be running.
+
+### An answer about an image is wrong
+
+Small vision models misread some images, especially diagrams. Try a sharper or tighter-cropped image, or correct the misreading in a follow-up message. For transcriptions, compare against the image — a wrong subscript or sign is the most common slip.
+
+### Image answers stop mid-way
+
+Images take about 1,000 tokens of the model's context window. Raise `OLLAMA_CONTEXT_LENGTH` to `8192` as described above, and make sure the **Images** model is an `-instruct` one, not a thinking one.
+
 ### LLM responses are very slow
 
 First call after Loki sits idle is slow because the model has to load into VRAM. Subsequent calls are fast. Set `OLLAMA_KEEP_ALIVE=2h` in your environment to keep it loaded longer.
@@ -524,6 +592,7 @@ Everything runs locally:
 - Text-to-speech uses Piper locally
 - Reminders are stored in a local SQLite file
 - Conversation history is in a local file
+- Images you attach are read by the local vision model; copies are kept in `chat_images/` so the chat history can show them. Delete that folder any time.
 
 The only network connections Loki makes are:
 - To `localhost:11434` (Ollama) — never leaves your machine
@@ -550,7 +619,7 @@ Add your preferred license here (MIT is a reasonable default for personal projec
 Loki is built on top of excellent open-source projects:
 
 - [Ollama](https://ollama.com) for local LLM hosting
-- [Qwen](https://github.com/QwenLM/Qwen3) for the language model
+- [Qwen](https://github.com/QwenLM/Qwen3) for the language model, and [Qwen3-VL](https://github.com/QwenLM/Qwen3-VL) for the vision model
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for speech recognition
 - [Piper](https://github.com/rhasspy/piper) for text-to-speech
 - [PySide6](https://wiki.qt.io/Qt_for_Python) for the GUI

@@ -28,3 +28,8 @@ ideas.txt
 # OS
 Thumbs.db
 .DS_Store
+
+settings.json
+chat_images/
+model_eval/report.html
+model_eval/results.json

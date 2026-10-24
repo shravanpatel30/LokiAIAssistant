@@ -127,6 +127,14 @@ details.reasoning > summary:hover { color: var(--text); }
 .reasoning-body > :first-child { margin-top: 0; }
 .reasoning-body > :last-child  { margin-bottom: 0; }
 
+/* ---------- attached images (thumbnails under your message) ---------- */
+.thumbs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.thumbs img {
+  max-width: 260px; max-height: 180px;
+  border-radius: 6px; border: 1px solid var(--border);
+  background: #fff; display: block; cursor: zoom-in;
+}
+
 /* ---------- math ---------- */
 .katex { font-size: 1.08em; }
 .katex-display { margin: 0.6em 0; overflow-x: auto; overflow-y: hidden; padding: 2px 0; }
