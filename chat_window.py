@@ -17,7 +17,7 @@ from PySide6.QtWebEngineCore import QWebEnginePage, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLineEdit, QPushButton, QLabel, QFrame, QMenu, QSizePolicy, QComboBox, QToolButton,
+    QLineEdit, QPushButton, QLabel, QFrame, QMenu, QSizePolicy, QComboBox, QToolButton, QListView,
 )
 
 import models
@@ -28,6 +28,7 @@ KATEX_JS = BASE_DIR / "web" / "vendor" / "katex" / "katex.min.js"
 UI_FONT_FILE = BASE_DIR / "web" / "vendor" / "fonts" / "google-sans-latin-wght-normal.woff2"
 HISTORY_FILE = BASE_DIR / "chat_history.jsonl"
 ICON_FILE = BASE_DIR / "AI_Icon.png"
+CHEVRON_FILE = BASE_DIR / "web" / "chevron-down.svg"   # dropdown arrow
 CHAT_IMAGES_DIR = BASE_DIR / "chat_images"   # copies of pasted/dropped images
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
@@ -287,6 +288,7 @@ class ModelCombo(QComboBox):
         super().__init__(parent)
         self.role = role                     # "main" or "vision"
         self.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+        self.setView(QListView())            # so the stylesheet can style the list items
 
     def showPopup(self):
         self.refresh()                       # pick up models pulled since startup
@@ -341,22 +343,30 @@ class ChatWindow(QMainWindow):
         combo_style = """
             QComboBox {
                 background-color: #1E1F20; color: #E3E3E3;
-                border: 1px solid #2a2a2e; border-radius: 4px;
-                padding: 3px 8px; font-family: '%s', 'Segoe UI'; font-size: 9pt;
+                border: 1px solid #2a2a2e; border-radius: 6px;
+                padding: 3px 24px 3px 10px; font-family: '%(font)s', 'Segoe UI'; font-size: 9pt;
             }
-            QComboBox:hover { border-color: #534AB7; }
+            QComboBox:hover, QComboBox:on { border-color: #534AB7; }
+            QComboBox::drop-down {
+                subcontrol-origin: padding; subcontrol-position: center right;
+                width: 22px; border: none; background: transparent;
+            }
+            QComboBox::down-arrow { image: url("%(chevron)s"); width: 10px; height: 10px; }
             QComboBox QAbstractItemView {
                 background-color: #1E1F20; color: #E3E3E3;
-                selection-background-color: #534AB7;
+                border: 1px solid #2a2a2e; border-radius: 6px;
+                padding: 4px; outline: none;
             }
-        """ % ui_font
+            QComboBox QAbstractItemView::item { padding: 5px 8px; border-radius: 4px; }
+            QComboBox QAbstractItemView::item:hover,
+            QComboBox QAbstractItemView::item:selected { background-color: #534AB7; }
+        """ % {"font": ui_font, "chevron": CHEVRON_FILE.as_posix()}
         label_style = "color: #9aa0a6; font-size: 9pt; font-family: '%s', 'Segoe UI';" % ui_font
         top.addStretch()
         self.model_combos = {}
         for role, text, tip in (
-            ("main", "Model", "Main model: chat, PDFs, commands, and reasoning about images"),
-            ("vision", "Images", "Vision model (👁): looks at images you paste or drop, "
-                                 "then the main model answers"),
+            ("main", "Model", "Main model: chat, PDFs, commands and LaTeX"),
+            ("vision", "Images", "Vision model (👁): answers questions about images you paste or drop"),
         ):
             lbl = QLabel(text)
             lbl.setStyleSheet(label_style)

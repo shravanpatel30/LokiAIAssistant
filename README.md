@@ -420,6 +420,7 @@ LokiAIAssistant/
 │   ├── chat.html           # The chat page shown inside the window
 │   ├── chat.css            # Chat colors, fonts, spacing (edit to restyle)
 │   ├── chat.js             # Markdown + math rendering, copy buttons
+│   ├── chevron-down.svg    # Arrow on the model dropdowns
 │   └── vendor/             # Bundled KaTeX, marked and Google Sans fonts (offline)
 ├── manual_apps.json        # Manual app overrides (optional)
 ├── latex_preferences.md    # LaTeX style preferences (optional)
