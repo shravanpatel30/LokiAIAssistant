@@ -428,7 +428,6 @@ LokiAIAssistant/
 ├── chat_history.jsonl      # Conversation log (auto-created)
 ├── settings.json           # Your model choices (auto-created)
 ├── chat_images/            # Copies of images you've attached (auto-created)
-├── model_eval/             # Kit for comparing models on your kind of questions (see its README)
 ├── AI_Icon.png             # Tray and window icon
 ├── voices/                 # Piper voice files (you download these)
 ├── logs/                   # Daily log files in tray mode (auto-created)
@@ -460,8 +459,6 @@ Pick it from the **Model** dropdown in the chat window (see *Choosing models*). 
 - `llama3.2:3b` — much smaller (~2 GB), runs fine on CPU, less capable at chat (no thinking mode)
 
 Run `ollama pull <model>` first to download it. The choice is stored in `settings.json`; delete that file to go back to the defaults.
-
-To compare models on the kind of questions you actually ask — including image questions — use the kit in `model_eval/` (see `model_eval/README.md`).
 
 ### Change the voice
 
@@ -595,7 +592,7 @@ Everything runs locally:
 - Images you attach are read by the local vision model; copies are kept in `chat_images/` so the chat history can show them. Delete that folder any time.
 
 The only network connections Loki makes are:
-- To `localhost:11434` (Ollama) — never leaves your machine
+- To `127.0.0.1:11434` (Ollama, on your own machine) — never leaves your machine
 - The initial download of the model and Whisper model files from their respective servers (one-time)
 
 Two things involve the internet only when you ask for them:

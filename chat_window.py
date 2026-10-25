@@ -31,7 +31,7 @@ ICON_FILE = BASE_DIR / "AI_Icon.png"
 CHAT_IMAGES_DIR = BASE_DIR / "chat_images"   # copies of pasted/dropped images
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
 
-THINK_LABEL = "🧠 Think"    # text on the thinking-mode button — change the icon here
+THINK_LABEL = "✦ Think"    # text on the thinking-mode button — change the icon here
 
 WINDOW_HISTORY_LIMIT = 50   # messages shown when the window opens
 DISK_HISTORY_LIMIT = 1000   # most recent N messages kept on disk

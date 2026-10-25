@@ -10,7 +10,7 @@ _TRANSFORMS = standard_transformations + (implicit_multiplication_application,)
 
 # These get set by assistant.py so this module can call the LLM for the
 # natural-language fallback. Kept simple to avoid circular imports.
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 CHAT_MODEL = "qwen3:8b"
 
 

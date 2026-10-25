@@ -1,12 +1,13 @@
 """Which Ollama models Loki uses, and what each installed model can do.
 
 Two roles:
-  main    — chat, PDF questions, routing, LaTeX, system info, calculus
-            translation, and the "think" half of image questions
-  vision  — the "see" half of image questions (describes the image)
+  main    — chat, PDF questions, routing, LaTeX, system info and calculus
+            translation (and images too, if it can see)
+  vision  — answers questions about attached images
 
-Both are picked from dropdowns in the chat window and remembered in
-settings.json. Anything you `ollama pull` shows up in the dropdowns.
+Both are picked from dropdowns in the chat window. settings.json is created
+the first time you change one; until then the DEFAULTS below are used.
+Anything you `ollama pull` shows up in the dropdowns.
 """
 import json
 import threading
@@ -14,7 +15,7 @@ from pathlib import Path
 
 import requests
 
-OLLAMA = "http://localhost:11434"
+OLLAMA = "http://127.0.0.1:11434"   # 127.0.0.1, not localhost: on Windows, localhost tries IPv6 first and adds ~2 s per call
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 
 DEFAULTS = {

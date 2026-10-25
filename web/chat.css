@@ -12,7 +12,7 @@
   --code-bg:        #1E1F20;   /* code block + inline code background */
   --code-header:    #2a2a2e;   /* code block header strip */
   --border:         #2a2a2e;   /* tables, quotes */
-  --accent:         #534AB7;   /* reasoning sidebar (matches the 🧠 button) */
+  --accent:         #534AB7;   /* reasoning sidebar (matches the Think button) */
   --code-radius:    0px;       /* try 8px for rounded code blocks */
 
   /* Google Sans + Google Sans Code (bundled in web/vendor/fonts). Swap in any

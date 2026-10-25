@@ -31,5 +31,4 @@ Thumbs.db
 
 settings.json
 chat_images/
-model_eval/report.html
-model_eval/results.json
+model_eval/

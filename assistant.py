@@ -64,7 +64,7 @@ LATEX_PREFS_FILE = BASE_DIR / "latex_preferences.md"
 LOCKFILE = os.path.join(tempfile.gettempdir(), "loki_assistant.lock")
 
 # Which models to use is chosen in the chat window (see models.py / settings.json)
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = "http://127.0.0.1:11434/api/chat"   # 127.0.0.1, not localhost: on Windows, localhost tries IPv6 first and adds ~2 s per call
 
 VOICE_HOTKEY = "f9"     # press and hold to talk
 VOICE_OUTPUT = False    # speak replies out loud
@@ -456,7 +456,7 @@ def chat(message, stream=False, images=None):
                 msg = chunk.get("message", {})
                 if msg.get("thinking"):
                     if not reasoning:
-                        print("🧠 reasoning...", flush=True)
+                        print("✦ reasoning...", flush=True)
                     reasoning += msg["thinking"]
                 piece = msg.get("content", "")
                 print(piece, end="", flush=True)
@@ -1102,7 +1102,7 @@ def handle_window(user_text, images=None):
     if cmd:
         bridge.system_message.emit(run_utility(cmd).text)
         if cmd in ("think_on", "think_off"):
-            bridge.thinking_mode_changed.emit(THINKING)   # keep the 🧠 button in sync
+            bridge.thinking_mode_changed.emit(THINKING)   # keep the Think button in sync
         return
 
     bridge.thinking_started.emit()
@@ -1220,7 +1220,7 @@ def tray_mode():
         bridge.system_message.emit(f"{label}: {name}")
     window.model_chosen.connect(on_model_chosen)
 
-    # The 🧠 button in the window turns thinking mode on/off
+    # The Think button in the window turns thinking mode on/off
     window.thinking_toggled.connect(
         lambda on: bridge.system_message.emit(set_thinking(on))
     )

@@ -2,7 +2,7 @@
 import numpy as np
 import requests
 
-OLLAMA_EMBED_URL = "http://localhost:11434/api/embed"
+OLLAMA_EMBED_URL = "http://127.0.0.1:11434/api/embed"
 EMBED_MODEL = "nomic-embed-text"
 
 CHUNK_SIZE = 500       # approx words per chunk
